@@ -1,4 +1,4 @@
-# Watchfloor
+# Watchman
 
 A live picture of the planet's traffic, drawn like a printed chart on warm paper: every aircraft a volunteer receiver can hear, ships reporting over AIS, earthquakes as they happen, disasters with an alert level, and the space station overhead.
 
@@ -49,7 +49,7 @@ This is where most of the work went.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ahroonsanthosh/coolshi)
 
-Watchfloor needs a small always-on Node server (most of its sources don't allow direct browser requests), so it can't run on static hosting like GitHub Pages. The button above deploys `render.yaml` to Render's free tier; any container host works with the `Dockerfile`. On Render's free plan the service sleeps after 15 minutes without visitors and takes about a minute to wake.
+Watchman needs a small always-on Node server (most of its sources don't allow direct browser requests), so it can't run on static hosting like GitHub Pages. The button above deploys `render.yaml` to Render's free tier; any container host works with the `Dockerfile`. On Render's free plan the service sleeps after 15 minutes without visitors and takes about a minute to wake.
 
 ## Running it
 
@@ -90,11 +90,12 @@ Everything is optional; copy `.env.example` to `.env`.
 
 ### Free coverage, no keys
 
-Without any keys, Watchfloor combines:
+Without any keys, Watchman combines:
 
 - **OpenSky** for a worldwide aircraft snapshot (anonymous allowance).
 - **A worldwide sweep** across four volunteer ADS-B networks (adsb.fi, adsb.lol, airplanes.live, adsb.one): 349 circles of 250 nm placed wherever there are scheduled airports, busiest airspace every two minutes, the rest every five, each network kept under its published rate limit. It fills what OpenSky misses and carries the whole picture when OpenSky's credits run out (the status line then says `Live · regional`).
 - **Estimated positions beyond receiver range**, the way commercial trackers fill the oceans. When an airliner at cruise falls silent and its filed route is confirmed by its position and heading (within 30° of the destination), it is carried along the great circle to its destination at its last ground speed until about 20 minutes out, when receivers there should hear it again. Estimates are drawn as faded ghosts, labelled everywhere, kept out of every live count and headline, and replaced by the first real report.
+- **Worldwide by aircraft type.** adsb.lol, airplanes.live and adsb.one answer "every aircraft of this type, anywhere" in one request, so the server asks for the 60 most common types (ranked from live traffic) every few minutes. In testing that added about 15–20% more aircraft than the circle sweep alone.
 - **Your view**, refreshed every five seconds from the same networks, plus worldwide military aircraft and emergency squawks.
 - **Ships worldwide** from Open Waters AIS, an open network that merges government feeds, AISHub, aisstream.io and volunteer receivers and needs no key: the server sweeps the world's seas in 10° boxes (busy ones every 3 minutes, empty ones hourly) within its anonymous limits, and polls whatever you are looking at every 20 seconds. Plus Fintraffic (Baltic) and Kystverket (Norway) directly. Around 40,000 ships within two minutes of starting; the browser receives only those in view (up to 12,000). An optional free token (`OPENWATERS_TOKEN`) raises the limits.
 

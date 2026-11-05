@@ -1,4 +1,4 @@
-// Watchfloor aggregator. Polls every feed, merges them into one picture, and
+// Watchman aggregator. Polls every feed, merges them into one picture, and
 // serves it to browsers as small deltas over plain HTTP. Run with Node 22.18+
 // (`node server/index.ts`); no build step.
 
@@ -62,7 +62,20 @@ const watching = () => [...views.values()].some((v) => Date.now() - v.seen < 60_
 // ---------------------------------------------------------------------------
 // adsb.fi / adsb.lol: two lanes, each paced to what its network allows.
 
-type Job = { key: string; url: (p: typeof PROVIDERS.adsbfi) => string; cadence: number; due: number };
+type P = (typeof PROVIDERS)[Provider];
+type Job = { key: string; url: (p: P) => string; cadence: number; due: number; needsType?: boolean };
+
+// Worldwide by aircraft type: one request returns every aircraft of that type
+// a network can hear, anywhere, so the most common sixty types cover most
+// airline traffic in a fraction of the requests a circle sweep needs.
+const SEED_TYPES = ['B738', 'A320', 'A20N', 'A21N', 'A321', 'B38M', 'B739', 'A319', 'B789', 'B77W', 'A359', 'B763', 'B788', 'A333', 'E75L', 'CRJ9', 'B737', 'B752', 'DH8D', 'AT76', 'E190', 'A332', 'B772', 'B744', 'B748', 'A388', 'CRJ7', 'E195', 'BCS3', 'B39M'];
+let topTypes = SEED_TYPES;
+setInterval(() => {
+  const n = new Map<string, number>();
+  for (const r of air.values()) if (r[10] && !(r[14] & 1)) n.set(r[10], (n.get(r[10]) ?? 0) + 1);
+  const ranked = [...n.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t).filter((t) => /^[A-Z0-9]{2,4}$/.test(t));
+  topTypes = [...new Set([...ranked.slice(0, 60), ...SEED_TYPES])].slice(0, 70);
+}, 300_000);
 const lastRun = new Map<string, number>();
 
 const SWEEP = sweepGrid(join(ROOT, 'src/data/airports.json'));
@@ -97,7 +110,14 @@ function nextJob(lane: Provider, now: number): Job | null {
   for (const s of ['7700', '7600', '7500']) {
     jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000 });
   }
-  // 3. Sweep the world, busiest airspace most often. This fills in what
+  // 3. Worldwide by type, on the networks that offer it.
+  if (PROVIDERS[lane].type) {
+    for (const t of topTypes) {
+      const key = `ty:${t}`;
+      jobs.push({ key, url: (P) => P.type!(t), cadence: 240, due: (lastRun.get(key) ?? 0) + 150_000, needsType: true });
+    }
+  }
+  // 4. Sweep the world, busiest airspace most often. This fills in what
   // OpenSky misses and carries the whole picture when its credits run out.
   const fast = opensky.healthy ? 120_000 : 75_000;
   for (const p of SWEEP) {
@@ -247,7 +267,7 @@ const server = http.createServer(async (req, res) => {
       // The ships in the viewer's box (or the busiest of them), whole each time.
       const b = url.searchParams.get('bbox')?.split(',').map(Number);
       const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
-      const rows = sea.inView(box, box ? 12_000 : 5_000, Number(url.searchParams.get('sel')) || 0);
+      const rows = sea.inView(box, box ? 12_000 : 3_000, Number(url.searchParams.get('sel')) || 0);
       return sendJson(req, res, { now: Date.now(), full: true, rows, removed: [] });
     }
     if (p === '/api/world') {
@@ -286,7 +306,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Watchfloor aggregator on http://localhost:${PORT}`);
+  console.log(`Watchman aggregator on http://localhost:${PORT}`);
   console.log(`  OpenSky: ${opensky.status.note}, every ${opensky.pollS}s while watched`);
   console.log(`  AISStream: ${aisstream.enabled ? 'on' : 'off (no AISSTREAM_API_KEY)'}`);
 });

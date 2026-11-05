@@ -224,8 +224,18 @@ function setup() {
 
   // Ships.
   addSource('ships');
+  // Zoomed out, ships are dots: thousands of them, and cheap to draw.
   map.addLayer({
-    id: 'ships', type: 'symbol', source: 'ships',
+    id: 'ship-dots', type: 'circle', source: 'ships', maxzoom: 6,
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 0.9, 5, 1.8],
+      'circle-color': ['case', ['get', 'sel'], INK, ['get', 'still'], SHIP_STILL, SHIP],
+      'circle-opacity': ['case', ['get', 'still'], 0.55, 0.9],
+      'circle-pitch-alignment': 'map',
+    },
+  });
+  map.addLayer({
+    id: 'ships', type: 'symbol', source: 'ships', minzoom: 6,
     layout: {
       'icon-image': ['case', ['get', 'still'], 'shipStill', 'ship'],
       'icon-size': ['interpolate', ['linear'], ['zoom'], 2, ['case', ['get', 'still'], 0.07, 0.14], 6, ['case', ['get', 'still'], 0.14, 0.3], 9, ['case', ['get', 'still'], 0.24, 0.5], 13, ['case', ['get', 'still'], 0.34, 0.72]],
@@ -305,14 +315,14 @@ function setup() {
 
   bindPointer();
   applyLayerVisibility();
-  app.on('layers', applyLayerVisibility);
-  app.on('selection', () => { loadSelectionExtras(); needsFull = true; });
+  app.on('layers', () => { applyLayerVisibility(); needsShips = true; });
+  app.on('selection', () => { loadSelectionExtras(); needsFull = true; needsShips = true; });
   app.on('filter', () => { needsFull = true; });
   updateNight();
   setInterval(updateNight, 60_000);
   loadRadar();
   setInterval(loadRadar, 5 * 60_000);
-  picture.on((w) => { if (w === 'world') updateWorld(); });
+  picture.on((w) => { if (w === 'world') updateWorld(); if (w === 'sea') needsShips = true; });
   requestAnimationFrame(frame);
 }
 
@@ -336,7 +346,7 @@ function airportFeatures(): FC {
 
 const LAYER_GROUPS: Record<string, string[]> = {
   aircraft: ['aircraft'],
-  ships: ['ships'],
+  ships: ['ships', 'ship-dots'],
   labels: ['labels'],
   airports: ['airports', 'airport-labels'],
   quakes: ['quakes', 'quake-fill', 'quake-labels'],
@@ -449,7 +459,9 @@ export function issNow(): { lat: number; lon: number; alt: number; vel: number }
 let needsFull = true;
 let lastDraw = 0;
 let visibleAir = 0;
-let visibleSea = 0;
+let shipLabels: GeoJSON.Feature[] = [];
+let lastShips = 0;
+let needsShips = true;
 export const counts = { air: 0, sea: 0, airAll: 0, seaAll: 0 };
 
 const ICON_SIZE: Record<string, number> = {
@@ -482,8 +494,8 @@ function frame(t: number) {
   const z = map.getZoom();
   // Redraw rate scales with how much is on screen: smooth when zoomed in,
   // thrifty with ten thousand aircraft on the globe.
-  const n = visibleAir + visibleSea;
-  const interval = n > 6000 ? 1000 : n > 2500 ? 500 : n > 800 ? 200 : z > 6 ? 50 : 120;
+  const n = visibleAir;
+  const interval = n > 5000 ? 1500 : n > 2500 ? 600 : n > 800 ? 200 : z > 6 ? 50 : 120;
   animatePulse(t);
   updateIss();
   if (!needsFull && t - lastDraw < interval) {
@@ -540,7 +552,10 @@ function drawTracks(z: number) {
       }
     }
   }
-  if (app.layers.ships) {
+  // Ships move slowly: rebuild them every few seconds, not every frame.
+  const shipsDue = needsShips || performance.now() - lastShips > (z >= 8 ? 1000 : z >= 5 ? 4000 : 10_000);
+  if (shipsDue) shipLabels = [];
+  if (app.layers.ships && shipsDue) {
     for (const s of picture.ships.values()) {
       if (s.id !== selId && !inView(b, s.x, s.y)) continue;
       const r = s.row;
@@ -554,7 +569,7 @@ function drawTracks(z: number) {
         },
       });
       if (wantLabels && z >= 9 && r[S.name]) {
-        labels.push({
+        shipLabels.push({
           type: 'Feature', geometry: { type: 'Point', coordinates: [s.x, s.y] },
           properties: { name: r[S.name], sub: s.still ? 'moored / at anchor' : `${Math.round(r[S.sog] ?? 0)} kt`, sort: 1e5 },
         });
@@ -562,12 +577,16 @@ function drawTracks(z: number) {
     }
   }
   visibleAir = ca;
-  visibleSea = cs;
-  counts.air = ca; counts.sea = cs;
+  if (shipsDue) counts.sea = cs;
+  counts.air = ca;
   counts.airAll = picture.aircraft.size; counts.seaAll = picture.world?.ships?.total ?? picture.ships.size;
   sources.aircraft.setData(fc(air));
-  sources.ships.setData(fc(sea));
-  sources.labels.setData(fc(labels));
+  if (shipsDue) {
+    sources.ships.setData(fc(sea));
+    lastShips = performance.now();
+    needsShips = false;
+  }
+  sources.labels.setData(fc(labels.concat(shipLabels)));
   updateSelectionOnly();
 }
 
@@ -732,13 +751,13 @@ function updateIss() {
 // ---------------------------------------------------------------------------
 // Pointer
 
-const PICKABLE = ['aircraft', 'ships', 'quakes', 'disasters', 'airports', 'iss'];
+const PICKABLE = ['aircraft', 'ships', 'ship-dots', 'quakes', 'disasters', 'airports', 'iss'];
 
 function toSelection(f: MapGeoJSONFeature): Selection | null {
   const id = f.properties?.id as string;
   switch (f.layer.id) {
     case 'aircraft': return { kind: 'air', id };
-    case 'ships': return { kind: 'sea', id };
+    case 'ships': case 'ship-dots': return { kind: 'sea', id };
     case 'quakes': return { kind: 'quake', id };
     case 'disasters': return { kind: 'disaster', id };
     case 'airports': return { kind: 'airport', id };
@@ -753,7 +772,7 @@ function pick(point: maplibregl.Point): Selection | null {
   const feats = map.queryRenderedFeatures(box, { layers });
   if (!feats.length) return null;
   // Nearest wins, with tracks preferred over the background events.
-  const rank = (l: string) => (l === 'aircraft' || l === 'ships' || l === 'iss' ? 0 : l === 'airports' ? 2 : 1);
+  const rank = (l: string) => (l === 'aircraft' || l === 'ships' || l === 'ship-dots' || l === 'iss' ? 0 : l === 'airports' ? 2 : 1);
   feats.sort((a, b) => rank(a.layer.id) - rank(b.layer.id));
   return toSelection(feats[0]);
 }
@@ -774,7 +793,7 @@ function bindPointer() {
     app.select(s);
   });
   map.on('dragstart', () => { if (app.follow) app.setFollow(false); });
-  map.on('moveend', reportView);
+  map.on('moveend', () => { reportView(); needsShips = true; });
   map.on('move', () => { needsFull = true; });
   reportView();
 }

@@ -37,7 +37,7 @@ export class Digitraffic {
     const from = this.lastLoc ? `?from=${this.lastLoc - 60_000}` : '';
     try {
       const { data } = await getJson<any>(`https://meri.digitraffic.fi/api/ais/v1/locations${from}`, {
-        headers: { 'Digitraffic-User': 'Watchfloor/1.0' },
+        headers: { 'Digitraffic-User': 'Watchman/1.0' },
       });
       let n = 0, newest = this.lastLoc;
       for (const f of data.features ?? []) {
@@ -69,7 +69,7 @@ export class Digitraffic {
     const from = this.lastMeta ? `?from=${this.lastMeta - 60_000}` : '';
     try {
       const { data } = await getJson<any[]>(`https://meri.digitraffic.fi/api/ais/v1/vessels${from}`, {
-        headers: { 'Digitraffic-User': 'Watchfloor/1.0' },
+        headers: { 'Digitraffic-User': 'Watchman/1.0' },
       });
       for (const v of data) {
         if (v.timestamp > this.lastMeta) this.lastMeta = v.timestamp;

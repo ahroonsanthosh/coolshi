@@ -3,7 +3,7 @@
 
 import type { SourceStatus } from '../../shared/protocol.ts';
 
-export const UA = 'Watchfloor/1.0 (+https://github.com/ahroonsanthosh/coolshi)';
+export const UA = 'Watchman/1.0 (+https://github.com/ahroonsanthosh/coolshi)';
 
 export class HttpError extends Error {
   status: number;

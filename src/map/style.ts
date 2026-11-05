@@ -23,7 +23,7 @@ const FONT_BOLD = ['Noto Sans Bold'];
 export function paperStyle(): StyleSpecification {
   return {
     version: 8,
-    name: 'Watchfloor paper',
+    name: 'Watchman paper',
     projection: { type: 'globe' },
     glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
     sky: {

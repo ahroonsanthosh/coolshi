@@ -87,24 +87,28 @@ export const PROVIDERS = {
       `https://opendata.adsb.fi/api/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${Math.round(nm)}`,
     mil: 'https://opendata.adsb.fi/api/v2/mil',
     sqk: (s: string) => `https://opendata.adsb.fi/api/v2/sqk/${s}`,
+    type: null as null | ((t: string) => string), // not offered by adsb.fi
   },
   adsblol: {
     point: (lat: number, lon: number, nm: number) =>
       `https://api.adsb.lol/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${Math.round(nm)}`,
     mil: 'https://api.adsb.lol/v2/mil',
     sqk: (s: string) => `https://api.adsb.lol/v2/sqk/${s}`,
+    type: (t: string) => `https://api.adsb.lol/v2/type/${t}`,
   },
   airplaneslive: {
     point: (lat: number, lon: number, nm: number) =>
       `https://api.airplanes.live/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${Math.round(nm)}`,
     mil: 'https://api.airplanes.live/v2/mil',
     sqk: (s: string) => `https://api.airplanes.live/v2/squawk/${s}`,
+    type: (t: string) => `https://api.airplanes.live/v2/type/${t}`,
   },
   adsbone: {
     point: (lat: number, lon: number, nm: number) =>
       `https://api.adsb.one/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${Math.round(nm)}`,
     mil: 'https://api.adsb.one/v2/mil',
     sqk: (s: string) => `https://api.adsb.one/v2/sqk/${s}`,
+    type: (t: string) => `https://api.adsb.one/v2/type/${t}`,
   },
 };
 export type Provider = keyof typeof PROVIDERS;

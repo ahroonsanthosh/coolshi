@@ -1,7 +1,7 @@
 # One-click deploy on Render: https://render.com/deploy?repo=https://github.com/ahroonsanthosh/coolshi
 services:
   - type: web
-    name: watchfloor
+    name: watchman
     runtime: node
     plan: free
     branch: claude/practical-mccarthy-yfijni

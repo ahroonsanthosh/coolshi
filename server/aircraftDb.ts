@@ -33,7 +33,7 @@ export class AircraftDb {
     if (!fresh) {
       try {
         this.status = 'downloading';
-        const res = await fetch(URL_DB, { headers: { 'User-Agent': 'Watchfloor/1.0' } });
+        const res = await fetch(URL_DB, { headers: { 'User-Agent': 'Watchman/1.0' } });
         if (!res.ok) throw new Error(`${res.status}`);
         const gz = Buffer.from(await res.arrayBuffer());
         mkdirSync(this.dir, { recursive: true });
