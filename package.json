@@ -1,0 +1,31 @@
+{
+  "name": "watchfloor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A live picture of the world's sky and sea, drawn like a paper chart.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "node --watch server/index.ts",
+    "dev:client": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "start": "NODE_ENV=production node server/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "airports": "node scripts/build-airports.mjs",
+    "test": "node --test server/*.test.ts shared/*.test.ts"
+  },
+  "dependencies": {
+    "maplibre-gl": "^6.16.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^22.20.5",
+    "@types/three": "^0.187.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5"
+  }
+}
