@@ -118,6 +118,7 @@ function renderAircraft(a: Aircraft) {
   const chips = [
     em ? `<span class="chip red">Squawk ${r[A.sq]} · ${SQUAWK_MEANING[r[A.sq]] ?? 'Emergency'}</span>` : '',
     mil ? '<span class="chip blue">Military</span>' : '',
+    a.est ? '<span class="chip amber">Estimated position · out of range</span>' : '',
     r[A.flags] & AF.ladd ? '<span class="chip">Blocked from public lists (LADD)</span>' : '',
     r[A.flags] & AF.pia ? '<span class="chip">Privacy address (PIA)</span>' : '',
   ].join('');
@@ -178,10 +179,18 @@ function updateAircraft() {
   const how = r[A.flags] & AF.mlat ? 'MLAT' : r[A.flags] & AF.tisb ? 'TIS-B' : 'ADS-B';
   setCell('src', how, how === 'MLAT' ? 'timed by receivers' : how === 'TIS-B' ? 'relayed from radar' : 'from its own GNSS');
   const age = reportAge(a);
-  const est = age > 3 ? `drawn ${F.n0(Math.min(age, a.maxDr))} s ahead on its track` : 'drawn as reported';
+  const est = a.est ? 'estimated: out of receiver range, carried along its filed route'
+    : age > 3 ? `drawn ${F.n0(Math.min(age, a.maxDr))} s ahead on its track` : 'drawn as reported';
   setCell('age', `${F.ago(age)}`, `${est} · ${F.latLon(a.y, a.x)}`);
   const prov = el.querySelector('#prov');
   if (prov) {
+    if (a.est) {
+      const dest = AIRPORTS.find((p) => Math.abs(p[5] - a.est![0]) < 0.01 && Math.abs(p[6] - a.est![1]) < 0.01);
+      const eta = r[A.estEta] ? F.utc(r[A.estEta] * 1000) : '';
+      prov.innerHTML = `<b>Estimated position.</b> Last heard ${F.ago(age)} by ${F.esc(srcNames(r[A.src]))} at ${F.altitude(r[A.alt])} and ${F.speed(r[A.gs])}, flying a filed route that its position and heading confirmed. Since then it is drawn along the great circle to ${F.esc(dest ? dest[1] || dest[0] : 'its destination')} at that speed${eta ? `, arriving about ${eta} UTC` : ''}. The first real report replaces the estimate.`;
+      if (currentRoute) drawRouteBlock(a, currentRoute);
+      return;
+    }
     prov.innerHTML = `Heard by <b>${F.esc(srcNames(r[A.src]))}</b>, reporting about every ${F.n0(r[A.cad])} s. Between reports the symbol carries on along its great circle at reported ground speed, for up to ${F.n0(a.maxDr)} s; it fades after ${F.n0(a.staleAfter)} s without a report.${
       age > a.staleAfter ? ' <b>This track is stale.</b>' : ''}`;
   }

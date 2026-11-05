@@ -69,7 +69,7 @@ export class AirStore {
     let a = this.map.get(r.hex);
     if (!a) {
       a = {
-        row: [r.hex, r.lat, r.lon, r.posT, null, null, null, null, null, '', '', '', '', '', 0, 0, '', '', 0, r.cadence],
+        row: [r.hex, r.lat, r.lon, r.posT, null, null, null, null, null, '', '', '', '', '', 0, 0, '', '', 0, r.cadence, 0, 0, 0],
         upd: now, expires: 0, hist: [], sqStreak: 0,
       };
       this.map.set(r.hex, a);
@@ -98,6 +98,12 @@ export class AirStore {
     if (r.mil) flags |= AF.mil;
     if (r.ladd) flags |= AF.ladd;
     if (r.pia) flags |= AF.pia;
+    if (newer && (row[14] & AF.est)) {
+      // Back in range: a real report replaces the estimate.
+      flags &= ~AF.est;
+      row[20] = row[21] = row[22] = 0;
+      a.expires = 0;
+    }
     if (newer || row[3] === r.posT) {
       const moved = newer;
       row[1] = r.lat; row[2] = r.lon; row[3] = r.posT;
@@ -155,12 +161,31 @@ export class AirStore {
     if (h.length > HIST_MAX_POINTS) h.splice(0, h.length - HIST_MAX_POINTS);
   }
 
+  /**
+   * Called for an aircraft about to drop out of coverage. Return the
+   * destination and ETA to carry it on as an estimate, or null to let it go.
+   */
+  estimate: ((row: AircraftRow) => { lat: number; lon: number; eta: number } | null) | null = null;
+  /** Called for aircraft that have gone quiet and may soon expire. */
+  quiet: ((row: AircraftRow) => void) | null = null;
+
   sweep(now = Date.now()) {
     for (const [hex, a] of this.map) {
-      if (a.expires < now) {
-        this.map.delete(hex);
-        this.tomb.set(hex, now);
+      const row = a.row;
+      if (!(row[14] & AF.est) && now - row[3] * 1000 > 45_000 && a.expires - now < 240_000) this.quiet?.(row);
+      if (a.expires >= now) continue;
+      const est = !(row[14] & AF.est) ? this.estimate?.(row) : null;
+      if (est) {
+        row[14] |= AF.est;
+        row[20] = est.lat; row[21] = est.lon; row[22] = est.eta;
+        // Hold it until about 20 minutes out, when receivers near the
+        // destination should be hearing it again.
+        a.expires = Math.min(est.eta * 1000 - 1_200_000, now + 10 * 3_600_000);
+        a.upd = now;
+        if (a.expires > now) continue;
       }
+      this.map.delete(hex);
+      this.tomb.set(hex, now);
     }
     for (const [hex, t] of this.tomb) if (now - t > 600_000) this.tomb.delete(hex);
   }

@@ -100,6 +100,12 @@ export const PROVIDERS = {
     mil: 'https://api.airplanes.live/v2/mil',
     sqk: (s: string) => `https://api.airplanes.live/v2/squawk/${s}`,
   },
+  adsbone: {
+    point: (lat: number, lon: number, nm: number) =>
+      `https://api.adsb.one/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${Math.round(nm)}`,
+    mil: 'https://api.adsb.one/v2/mil',
+    sqk: (s: string) => `https://api.adsb.one/v2/sqk/${s}`,
+  },
 };
 export type Provider = keyof typeof PROVIDERS;
 

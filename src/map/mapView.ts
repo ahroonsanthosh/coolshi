@@ -8,7 +8,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 maplibregl.setWorkerUrl(workerUrl);
 import { A, AF, S, type HistoryPoint } from '../../shared/protocol.ts';
-import { destination, greatCircle, NM, distance } from '../../shared/geo.ts';
+import { bearing, destination, greatCircle, NM, distance } from '../../shared/geo.ts';
 import { nightPolygon } from '../../shared/sun.ts';
 import { paperStyle, PAPER, LABEL_FONT, LABEL_FONT_BOLD } from './style.ts';
 import { addIcons } from './icons.ts';
@@ -267,7 +267,8 @@ function setup() {
       'icon-color': ['case', ['get', 'em'], EMERGENCY, ['get', 'sel'], INK, altColorExpr()],
       'icon-halo-color': PAPER.bg,
       'icon-halo-width': ['interpolate', ['linear'], ['zoom'], 1, 0.4, 8, 1.4],
-      'icon-opacity': ['case', ['get', 'stale'], 0.35, 1],
+      // Estimates beyond receiver range are drawn as ghosts.
+      'icon-opacity': ['case', ['get', 'stale'], 0.35, ['get', 'est'], 0.42, 1],
     },
   });
 
@@ -519,12 +520,14 @@ function drawTracks(z: number) {
       const em = (r[A.flags] & AF.emergency) !== 0;
       const alt = ground ? -1 : (r[A.alt] ?? r[A.altGeom] ?? 0);
       const stale = nowS - a.posT > a.staleAfter;
+      const est = !!a.est;
+      const rot = est ? bearing(a.y, a.x, a.est![0], a.est![1]) : (r[A.trk] ?? 0);
       ca++;
       air.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [a.x, a.y] },
         properties: {
-          id: a.id, icon: a.cls, size: ICON_SIZE[a.cls], rot: r[A.trk] ?? 0, alt, em, stale,
+          id: a.id, icon: a.cls, size: ICON_SIZE[a.cls], rot, alt, em, stale, est,
           sel: a.id === selId, sort: a.id === selId ? 1e6 : em ? 1e5 : alt,
         },
       });
@@ -532,7 +535,7 @@ function drawTracks(z: number) {
         const name = r[A.cs] || r[A.reg] || r[A.hex].toUpperCase();
         labels.push({
           type: 'Feature', geometry: { type: 'Point', coordinates: [a.x, a.y] },
-          properties: { name, sub: [altitude(r[A.alt], ground), r[A.type]].filter(Boolean).join('  '), sort: a.id === selId ? -1 : -alt },
+          properties: { name, sub: a.est ? 'estimated' : [altitude(r[A.alt], ground), r[A.type]].filter(Boolean).join('  '), sort: a.id === selId ? -1 : -alt },
         });
       }
     }

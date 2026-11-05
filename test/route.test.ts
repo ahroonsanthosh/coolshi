@@ -27,3 +27,29 @@ test('route: on the ground at the origin counts as 0% flown', () => {
   assert.equal(r.ok, true);
   if (r.ok) assert.equal(r.progress, 0);
 });
+
+import { AirStore } from '../server/store.ts';
+import { AF } from '../shared/protocol.ts';
+
+test('estimates: a verified airliner leaving coverage is carried on, then replaced by a real report', () => {
+  const s = new AirStore();
+  const t0 = 1_793_840_000;
+  s.estimate = () => ({ lat: 37.6, lon: -122.4, eta: t0 + 3600 });
+  s.ingest({ hex: 'abc123', lat: 41.2, lon: -100.5, posT: t0, alt: 36000, gs: 450, trk: 268, cs: 'UAL1904', src: 2, cadence: 6 }, t0 * 1000);
+  s.sweep(t0 * 1000 + 200_000); // well past expiry
+  const row = s.get('abc123')!;
+  assert.ok(row[14] & AF.est);
+  assert.equal(row[22], t0 + 3600);
+  s.sweep(t0 * 1000 + 3_000_000); // 20 min before ETA: let go
+  assert.equal(s.get('abc123'), undefined);
+});
+
+test('estimates: a real report clears the estimate', () => {
+  const s = new AirStore();
+  const t0 = 1_793_840_000;
+  s.estimate = () => ({ lat: 37.6, lon: -122.4, eta: t0 + 7200 });
+  s.ingest({ hex: 'abc124', lat: 41.2, lon: -100.5, posT: t0, alt: 36000, gs: 450, trk: 268, cs: 'UAL1', src: 2, cadence: 6 }, t0 * 1000);
+  s.sweep(t0 * 1000 + 200_000);
+  s.ingest({ hex: 'abc124', lat: 40, lon: -110, posT: t0 + 1500, alt: 36000, gs: 450, trk: 268, src: 2, cadence: 6 }, (t0 + 1500) * 1000);
+  assert.equal(s.get('abc124')![14] & AF.est, 0);
+});

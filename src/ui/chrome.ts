@@ -55,10 +55,13 @@ export function initCaption() {
     }
     const n = picture.aircraft.size, m = picture.ships.size;
     if (!n && !m) return set('Listening…', 'gathering the world’s transponders', false);
-    let airborne = 0;
-    for (const a of picture.aircraft.values()) if (!(a.row[A.flags] & AF.ground) && reportAge(a) < a.staleAfter) airborne++;
+    let airborne = 0, est = 0;
+    for (const a of picture.aircraft.values()) {
+      if (a.est) est++;
+      else if (!(a.row[A.flags] & AF.ground) && reportAge(a) < a.staleAfter) airborne++;
+    }
     const q = picture.world?.quakes.filter((x) => Date.now() - x.time < 86_400_000).length ?? 0;
-    set(`${F.n0(airborne)} aircraft aloft`, `${F.n0(m)} ships · ${q} earthquakes today`, false);
+    set(`${F.n0(airborne)} aircraft aloft`, `${est ? `${F.n0(est)} more estimated beyond range · ` : ''}${F.n0(m)} ships · ${q} earthquakes today`, false);
   };
   app.on('hover', update);
   app.on('selection', update);
@@ -74,6 +77,7 @@ export function describe(kind: string, id: string): [string, string] | null {
     const ground = (r[A.flags] & AF.ground) !== 0;
     const what = r[A.desc] ? tidyDesc(r[A.desc]) : r[A.type] || CLASS_LABEL[a.cls];
     const em = r[A.flags] & AF.emergency ? ` · squawk ${r[A.sq]}` : '';
+    if (a.est) return [r[A.cs] || r[A.reg] || r[A.hex].toUpperCase(), `${what} · estimated position, out of receiver range ${F.ago(reportAge(a)).replace(' ago', '')}`];
     return [r[A.cs] || r[A.reg] || r[A.hex].toUpperCase(), `${what} · ${F.altitude(r[A.alt], ground)}${ground ? '' : ' · ' + F.speed(r[A.gs])}${em}`];
   }
   if (kind === 'sea') {
@@ -357,7 +361,7 @@ export function openAbout() {
         <div>
           <h1>Watchfloor</h1>
           <p>A live picture of the planet’s traffic: every aircraft broadcasting ADS-B that a volunteer receiver can hear, ships reporting over AIS, earthquakes as they are recorded, disasters with an alert level, and the space station overhead.</p>
-          <p>Nothing here is simulated. Each track is placed where it last reported and carried forward along its great circle at its reported speed until the next report: for 45 seconds when a nearby receiver hears it every few seconds, a little longer than the polling interval when only the worldwide feed sees it. Fade means stale. Routes are only drawn when the aircraft is actually flying them, because route databases are often wrong.</p>
+          <p>Nothing here is simulated. Each track is placed where it last reported and carried forward along its great circle at its reported speed until the next report: for 45 seconds when a nearby receiver hears it every few seconds, a little longer than the polling interval when only the worldwide feed sees it. Fade means stale. Over oceans and other gaps, airliners on a verified route are carried on as faded, clearly labelled estimates until receivers near their destination hear them again. Routes are only drawn when the aircraft is actually flying them, because route databases are often wrong.</p>
           <p>Coverage follows the volunteers. Europe and North America are dense; oceans, much of Africa and Central Asia are thin. Ships come from the open AIS networks of Finland and Norway by default, so the Baltic, the Norwegian coast and the North Sea are busy and the rest of the sea is quiet unless an AISStream key is set on the server.</p>
           <h4>Keys</h4>
           <div class="keys">

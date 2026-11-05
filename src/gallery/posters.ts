@@ -93,7 +93,7 @@ const nowUtc = () => `${F.utc(Date.now())} UTC`;
 
 function airborne(): Aircraft[] {
   const out: Aircraft[] = [];
-  for (const a of picture.aircraft.values()) if (!(a.row[A.flags] & AF.ground) && reportAge(a) < a.staleAfter) out.push(a);
+  for (const a of picture.aircraft.values()) if (!a.est && !(a.row[A.flags] & AF.ground) && reportAge(a) < a.staleAfter) out.push(a);
   return out;
 }
 

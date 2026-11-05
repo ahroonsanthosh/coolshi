@@ -14,10 +14,11 @@ import { OpenSky } from './feeds/opensky.ts';
 import { PROVIDERS, parseReadsb, type Provider } from './feeds/readsb.ts';
 import { Kystverket } from './feeds/kystverket.ts';
 import { sweepGrid } from './grid.ts';
+import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
-import { SRC, type WorldPayload } from '../shared/protocol.ts';
+import { AF, SRC, type WorldPayload } from '../shared/protocol.ts';
 import { destination, distance, NM } from '../shared/geo.ts';
 
 const gz = promisify(gzip);
@@ -29,6 +30,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 const DIST = join(ROOT, 'dist');
 
 const air = new AirStore();
+const estimator = new Estimator();
+air.quiet = (row) => estimator.quiet(row);
+air.estimate = (row) => estimator.estimate(row);
 const acdb = new AircraftDb(join(ROOT, '.cache'));
 acdb.load().then(() => {
   air.identity = acdb;
@@ -107,6 +111,7 @@ const laneStatus: Record<Provider, Status> = {
   adsbfi: new Status('adsbfi', 'adsb.fi', 'air', 1.5),
   adsblol: new Status('adsblol', 'adsb.lol', 'air', 1.5),
   airplaneslive: new Status('airplaneslive', 'airplanes.live', 'air', 1.5),
+  adsbone: new Status('adsbone', 'adsb.one', 'air', 1.5),
 };
 
 function startLane(lane: Provider, offsetMs: number, gapS: number) {
@@ -153,6 +158,7 @@ every(() => opensky.pollS, async () => {
 startLane('adsbfi', 300, 1.15);
 startLane('adsblol', 1050, 2.5);
 startLane('airplaneslive', 700, 1.15);
+startLane('adsbone', 900, 1.5);
 kystverket.start((r) => sea.ingest(r));
 every(() => 20, () => digitraffic.pollLocations((r) => sea.ingest(r)));
 every(() => 600, () => digitraffic.pollMetadata((r) => sea.ingest(r)));
@@ -190,7 +196,11 @@ async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, bod
 }
 
 function sources() {
-  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, digitraffic.status, kystverket.status, aisstream.status, usgs.status, gdacs.status, iss.status]
+  let est = 0;
+  for (const r of air.values()) if (r[14] & AF.est) est++;
+  estimator.status.count = est;
+  estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
+  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, digitraffic.status, kystverket.status, aisstream.status, usgs.status, gdacs.status, iss.status]
     .map((s) => s.toJSON());
 }
 

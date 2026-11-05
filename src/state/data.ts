@@ -4,7 +4,7 @@
 // we drew it and where it really is closes over a second.
 
 import { A, AF, S, type AircraftRow, type Delta, type ShipRow, type WorldPayload } from '../../shared/protocol.ts';
-import { destination, KT } from '../../shared/geo.ts';
+import { bearing, destination, KT } from '../../shared/geo.ts';
 import { classify, type AcClass } from '../lib/aircraft.ts';
 import { isStationary } from '../lib/ais.ts';
 
@@ -26,6 +26,8 @@ export interface Track {
   /** How far ahead (s) we may carry it, and when it counts as stale. */
   maxDr: number;
   staleAfter: number;
+  /** Estimated beyond coverage: carried along the great circle to here. */
+  est?: [number, number] | null;
 }
 
 export interface Aircraft extends Track {
@@ -51,6 +53,16 @@ const MAX_DR_SEA = 600;
 function airBudget(cad: number) {
   if (!(cad > 0)) cad = 10;
   return { maxDr: Math.min(240, Math.max(45, cad * 1.25)), staleAfter: Math.max(60, cad * 1.7) };
+}
+
+/** Out of range on a verified route: steer for the destination until ETA. */
+function applyEstimate(a: Aircraft) {
+  const r = a.row;
+  if (!(r[A.flags] & AF.est) || !r[A.estEta]) { a.est = null; return; }
+  a.est = [r[A.estLat], r[A.estLon]];
+  a.course = bearing(r[A.lat], r[A.lon], r[A.estLat], r[A.estLon]);
+  a.maxDr = Math.max(0, r[A.estEta] - r[A.posT]);
+  a.staleAfter = 1e9;
 }
 const SMOOTH_MS = 1200;
 
@@ -132,6 +144,7 @@ export class Picture {
       a.speed = ground && (r[A.gs] ?? 0) < 3 ? 0 : r[A.gs];
       a.course = r[A.trk];
       Object.assign(a, airBudget(r[A.cad]));
+      applyEstimate(a);
       const [nx, ny] = drPosition(a, now / 1000 + skew / 1000, a.maxDr);
       let dx = before[0] - nx;
       if (dx > 180) dx -= 360;
@@ -144,6 +157,7 @@ export class Picture {
     }
     a.speed = ground && (r[A.gs] ?? 0) < 3 ? 0 : r[A.gs];
     a.course = r[A.trk];
+    applyEstimate(a);
   }
 
   private async pollSea() {
@@ -221,6 +235,10 @@ export function drPosition(t: Track, nowS: number, maxS: number): [number, numbe
   if (dt <= 0) return [t.lon, t.lat];
   const [lat, lon] = destination(t.lat, t.lon, t.course, t.speed * KT * dt);
   return [lon, lat];
+}
+
+export function isEstimated(t: Track): boolean {
+  return !!t.est;
 }
 
 /** Seconds since the last position report. */

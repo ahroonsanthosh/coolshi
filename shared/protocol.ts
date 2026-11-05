@@ -4,15 +4,15 @@
 /** Aircraft row. Units: ft, kt, ft/min, degrees true, seconds since epoch. */
 export const A = {
   hex: 0, lat: 1, lon: 2, posT: 3, alt: 4, altGeom: 5, gs: 6, trk: 7, vr: 8, cs: 9, type: 10, reg: 11,
-  sq: 12, cat: 13, flags: 14, src: 15, desc: 16, owner: 17, emSince: 18, cad: 19,
+  sq: 12, cat: 13, flags: 14, src: 15, desc: 16, owner: 17, emSince: 18, cad: 19, estLat: 20, estLon: 21, estEta: 22,
 } as const;
 /** Bit flags in A.flags */
-export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64 } as const;
+export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64, est: 128 } as const;
 /** Source bit flags */
-export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64 } as const;
+export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64, adsbone: 128 } as const;
 export const SRC_NAMES: Record<number, string> = {
   1: 'OpenSky Network', 2: 'adsb.fi', 4: 'adsb.lol', 8: 'Fintraffic Digitraffic', 16: 'AISStream',
-  32: 'airplanes.live', 64: 'Kystverket (Norway)',
+  32: 'airplanes.live', 64: 'Kystverket (Norway)', 128: 'adsb.one',
 };
 
 export type AircraftRow = [
@@ -21,6 +21,8 @@ export type AircraftRow = [
   sq: string, cat: string, flags: number, src: number, desc: string, owner: string, emSince: number,
   /** Seconds between reports from the feed that sent the latest position. */
   cad: number,
+  /** Estimated track (AF.est): destination it is carried towards, and ETA (s). */
+  estLat: number, estLon: number, estEta: number,
 ];
 
 /** Ship row. Units: kt, degrees true, metres, seconds since epoch. */
