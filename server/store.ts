@@ -30,6 +30,8 @@ export interface AircraftReport {
   ladd?: boolean;
   pia?: boolean;
   emergency?: string; // ADS-B emergency/priority status
+  /** Extra fields the aircraft broadcasts (air data, autopilot, wind). */
+  ext?: Record<string, unknown>;
   src: number;
   /** Seconds this source normally takes between reports of one aircraft. */
   cadence: number;
@@ -41,6 +43,8 @@ interface Aircraft {
   expires: number; // server ms
   hist: HistoryPoint[];
   sqStreak: number; // consecutive reports with an emergency squawk
+  ext?: Record<string, unknown>;
+  extT?: number;
 }
 
 const EMERGENCY_SQUAWKS = new Set(['7500', '7600', '7700']);
@@ -62,6 +66,21 @@ export class AirStore {
   values() { return [...this.map.values()].map((a) => a.row); }
   get(hex: string) { return this.map.get(hex)?.row; }
   history(hex: string): HistoryPoint[] { return this.map.get(hex)?.hist ?? []; }
+  extras(hex: string) {
+    const a = this.map.get(hex);
+    return a?.ext ? { t: a.extT ?? 0, ...a.ext } : null;
+  }
+  /** Wind and temperature measured by aircraft in the last ten minutes. */
+  winds(now = Date.now()): [number, number, number, number, number, number | null][] {
+    const out: [number, number, number, number, number, number | null][] = [];
+    for (const a of this.map.values()) {
+      const e = a.ext;
+      if (!e || typeof e.ws !== 'number' || typeof e.wd !== 'number') continue;
+      if (now / 1000 - (a.extT ?? 0) > 600 || (a.row[4] ?? 0) < 5000) continue;
+      out.push([+a.row[1].toFixed(3), +a.row[2].toFixed(3), a.row[4] ?? 0, e.ws, e.wd, typeof e.oat === 'number' ? e.oat : null]);
+    }
+    return out;
+  }
 
   ingest(r: AircraftReport, now = Date.now()): void {
     if (!isFinite(r.lat) || !isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180) return;
@@ -131,6 +150,7 @@ export class AirStore {
         row[18] = 0;
       }
       if (moved) this.addHistory(a, r);
+      if (r.ext) { a.ext = r.ext; a.extT = r.posT; }
     } else {
       flags |= row[14] & (AF.ground | AF.mlat | AF.tisb);
     }
@@ -293,7 +313,10 @@ export class SeaStore {
 
   sweep(now = Date.now()) {
     for (const [k, s] of this.map) {
-      if (now / 1000 - s.row[3] > this.lifeS) {
+      // A ship moored or at anchor stays where it was: keep it six hours.
+      const r = s.row;
+      const still = r[7] === 1 || r[7] === 5 || (r[4] !== null && r[4] < 0.5);
+      if (now / 1000 - r[3] > (still ? 6 * 3600 : this.lifeS)) {
         this.map.delete(k);
         this.tomb.set(k, now);
       }

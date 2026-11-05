@@ -145,6 +145,7 @@ const LAYER_INFO: [LayerKey, string, string, string][] = [
   ['quakes', 'Earthquakes', 'USGS, M2.5+ today and M4.5+ this week', 'E'],
   ['disasters', 'Disasters', 'GDACS cyclones, floods, volcanoes, fires', ''],
   ['iss', 'Space station', 'The ISS and its ground track', ''],
+  ['winds', 'Winds aloft', 'Wind measured by aircraft in flight, last 10 min; arrows point downwind', 'W'],
   ['radar', 'Weather radar', 'Latest rain and snow, RainViewer', 'R'],
   ['night', 'Day and night', 'Terminator with civil, nautical and astronomical twilight', 'N'],
 ];
@@ -370,6 +371,7 @@ export function openAbout() {
             <kbd>L</kbd><span>Layers and filters</span>
             <kbd>F</kbd><span>Follow the selected track</span>
             <kbd>G</kbd><span>Back to the whole globe</span>
+            <kbd>W</kbd><span>Winds aloft, measured by aircraft</span>
             <kbd>R</kbd><span>Weather radar</span>
             <kbd>N</kbd><span>Day and night</span>
             <kbd>Esc</kbd><span>Close, or clear the selection</span>
@@ -467,6 +469,7 @@ export function initKeys(handlers: { index: () => void; home: () => void }) {
     else if (k === 'f' || k === 'F') { if (app.selection) app.setFollow(!app.follow); }
     else if (k === 'g' || k === 'G') handlers.home();
     else if (k === 'r' || k === 'R') app.setLayer('radar', !app.layers.radar);
+    else if (k === 'w' || k === 'W') app.setLayer('winds', !app.layers.winds);
     else if (k === 'n' || k === 'N') app.setLayer('night', !app.layers.night);
     else if (k === 'a' || k === 'A') app.setLayer('airports', !app.layers.airports);
     else if (k === 'e' || k === 'E') app.setLayer('quakes', !app.layers.quakes);

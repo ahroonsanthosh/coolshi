@@ -23,7 +23,7 @@ const VIA: Record<string, string> = {
 export class OpenWaters {
   status = new Status('openwaters', 'Open Waters AIS', 'sea', GAP_MS / 1000);
   private boxes: Box[] = [];
-  private token = process.env.OPENWATERS_TOKEN ?? '';
+  token = process.env.OPENWATERS_TOKEN ?? '';
   private backoff = 0;
   /** Boxes a viewer is looking at right now, polled ahead of the sweep. */
   focus: { s: number; w: number; n: number; e: number }[] = [];
@@ -32,10 +32,14 @@ export class OpenWaters {
 
   /** `ports`: [lat, lon] of places ships gather, to order the first sweep. */
   constructor(ports: [number, number][]) {
-    for (let s = -70; s < 80; s += 10) for (let w = -180; w < 180; w += 10) {
-      const near = ports.filter(([la, lo]) => la >= s && la < s + 10 && lo >= w && lo < w + 10).length;
+    // A personal token allows 400 square degrees a request: 20° boxes, a
+    // quarter of the requests for the same seas.
+    const step = this.token ? 20 : 10;
+    for (let s = -70; s < 80; s += step) for (let w = -180; w < 180; w += step) {
+      const n = Math.min(90, s + step), e = w + step;
+      const near = ports.filter(([la, lo]) => la >= s && la < n && lo >= w && lo < e).length;
       // First pass: busiest boxes first (a lower `next` is visited sooner).
-      this.boxes.push({ s, w, n: s + 10, e: w + 10, next: -near, count: -1 });
+      this.boxes.push({ s, w, n, e, next: -near, count: -1 });
     }
     this.status.note = 'worldwide: AISHub, aisstream.io, BarentsWatch and volunteers';
   }
@@ -55,7 +59,7 @@ export class OpenWaters {
     if (this.backoff > now) return (this.backoff - now) / 1000;
     const q = this.pick(now);
     if (!q) return GAP_MS / 1000;
-    const url = `${API}?bbox=${q.s},${q.w},${q.n},${q.e}&max_age=30m&kind=vessel`;
+    const url = `${API}?bbox=${q.s},${q.w},${q.n},${q.e}&max_age=6h&max_age_moving=30m&kind=vessel`;
     try {
       const { data } = await getJson<any>(url, this.token ? { headers: { Authorization: `Bearer ${this.token}` } } : {}, 30_000);
       let n = 0;
@@ -92,4 +96,31 @@ export class OpenWaters {
     }
     return GAP_MS / 1000;
   }
+}
+
+/** One ship's registry particulars and its last day of track, cached. */
+const shipCache = new Map<number, { t: number; v: unknown }>();
+export async function shipDetail(mmsi: number): Promise<unknown> {
+  const c = shipCache.get(mmsi);
+  if (c && Date.now() - c.t < 120_000) return c.v;
+  const token = process.env.OPENWATERS_TOKEN ?? '';
+  const h: Record<string, string> = { 'User-Agent': 'Watchman/1.0' };
+  if (token) h.Authorization = `Bearer ${token}`;
+  const id = String(mmsi).padStart(9, '0');
+  const from = new Date(Date.now() - 24 * 3600_000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const get = (u: string) => fetch(u, { headers: h }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const [d, t] = await Promise.all([
+    get(`https://ais.openwaters.io/v1/vessels/${id}`),
+    get(`https://ais.openwaters.io/v1/vessels/${id}/track?from=${from}`),
+  ]) as [any, any];
+  const p = d?.properties ?? {};
+  const v = {
+    particulars: p.particulars ?? null, firstSeen: p.first_seen ?? null, near: p.near ?? null,
+    track: t?.geometry?.type === 'LineString'
+      ? { coords: t.geometry.coordinates as [number, number][], times: (t.properties?.times ?? []) as string[], sog: (t.properties?.sog ?? []) as (number | null)[] }
+      : null,
+  };
+  shipCache.set(mmsi, { t: Date.now(), v });
+  if (shipCache.size > 500) shipCache.clear();
+  return v;
 }

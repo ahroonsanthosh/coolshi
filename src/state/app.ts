@@ -4,7 +4,7 @@
 import type { AcClass } from '../lib/aircraft.ts';
 
 export type LayerKey =
-  | 'aircraft' | 'ships' | 'labels' | 'airports' | 'quakes' | 'disasters' | 'iss' | 'radar' | 'night' | 'trails';
+  | 'aircraft' | 'ships' | 'labels' | 'airports' | 'quakes' | 'disasters' | 'iss' | 'radar' | 'night' | 'trails' | 'winds';
 
 export type AcFilter = AcClass | 'ground' | 'military';
 
@@ -15,7 +15,7 @@ export interface Selection {
 
 const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   aircraft: true, ships: true, labels: true, airports: true, quakes: true, disasters: true, iss: true,
-  radar: false, night: true, trails: true,
+  radar: false, night: true, trails: true, winds: false,
 };
 
 function load<T>(key: string, fallback: T): T {

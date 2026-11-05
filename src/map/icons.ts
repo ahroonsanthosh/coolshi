@@ -46,6 +46,7 @@ const PATHS: Record<string, string[]> = {
     'M14 30h17v40h-17Z', 'M69 30h17v40h-17Z', 'M31 47.5h38v5h-38Z', 'M43 36h14v28h-14Z',
   ],
   diamond: ['M50 8L92 50L50 92L8 50Z'],
+  arrow: ['M50 4L76 42H58V96H42V42H24Z'],
 };
 
 const SIZE = 64; // texture px; added at pixelRatio 2, so 32 css px

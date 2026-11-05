@@ -346,3 +346,10 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* Flight deck */
+.deck-h { display: flex; justify-content: space-between; margin: 22px 20px 0; font: 500 10.5px/1 var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--mute); }
+.deck-modes { margin: 4px 20px 0; }
+.grid.deck { margin-top: 12px; }
+.metar-raw { margin: 10px 20px 0; font: 500 11px/1.5 ui-monospace, 'SF Mono', Menlo, monospace; color: var(--mute); word-break: break-word; }
+.cat { display: inline-block; padding: 2px 7px; border-radius: 10px; font: 700 10.5px/1.3 var(--font); letter-spacing: .05em; color: #fff; }

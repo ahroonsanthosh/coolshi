@@ -8,6 +8,7 @@ import { picture, reportAge, type Aircraft } from '../state/data.ts';
 import { SQUAWK_MEANING, tidyDesc } from '../lib/aircraft.ts';
 import { airframe } from '../lib/enrich.ts';
 import { drawLand } from '../lib/land.ts';
+import { loadWinds, winds } from '../state/winds.ts';
 import { shipType } from '../lib/ais.ts';
 import * as F from '../lib/format.ts';
 import { drawSilhouette } from '../map/icons.ts';
@@ -118,13 +119,14 @@ function topBy(score: (a: Aircraft) => number, n: number): Aircraft[] {
 
 /** Look up airframes for the likely headline aircraft, briefly. */
 export async function prepare(): Promise<void> {
+  const windsReady = Date.now() - winds.at > 60_000 ? loadWinds() : Promise.resolve();
   const cands = [...topBy((a) => a.row[A.alt] ?? 0, 6), ...topBy((a) => a.row[A.gs] ?? 0, 6)]
     .filter((a) => !a.row[A.type] && !known.has(a.row[A.hex]));
   const work = Promise.all(cands.map(async (a) => {
     const af = await airframe(a.row[A.hex]);
     if (af?.icaoType) known.set(a.row[A.hex], { type: af.icaoType, desc: [af.manufacturer, af.type].filter(Boolean).join(' ') });
   }));
-  await Promise.race([work, new Promise((r) => setTimeout(r, 2500))]);
+  await Promise.race([Promise.all([work, windsReady]), new Promise((r) => setTimeout(r, 2500))]);
 }
 
 function typeOf(a: Aircraft): { type: string; desc: string } | null {
@@ -566,7 +568,44 @@ export function buildPosters(): Poster[] {
     }
   }
 
-  // 12. Disasters
+  // 12. The jet stream, as aircraft measure it
+  const ws = winds.reports.filter((w) => w[2] >= 20_000);
+  if (ws.length > 50) {
+    const top = ws.reduce((a, b) => (b[3] > a[3] ? b : a));
+    const [tlat, tlon, talt, tspd, tdir] = top;
+    posters.push({
+      key: 'jet', title: `Jet stream: ${tspd} kt`, subtitle: `the strongest wind ${F.n0(ws.length)} aircraft are measuring, at ${F.altitude(talt)} over ${F.latLon(tlat, tlon).replace(/\s+/, ' ')}`,
+      target: { kind: 'none', id: '', lon: tlon, lat: tlat, zoom: 4 },
+      draw: (c) => {
+        bg(c, '#1e2a5a');
+        header(c, 'Winds aloft', nowUtc(), CREAM);
+        const x0 = 64, y0 = 170, w = PW - 128, h = w / 2;
+        c.fillStyle = 'rgba(251,244,230,0.10)';
+        drawLand(c, x0, y0, w, h);
+        // One arrow per report, downwind, longer and warmer as it blows harder.
+        for (const [lat, lon, , spd, dir] of [...ws].sort((a, b) => a[3] - b[3])) {
+          const x = x0 + ((lon + 180) / 360) * w, y = y0 + ((90 - lat) / 180) * h;
+          const len = 4 + spd * 0.16, a = ((dir + 180 - 90) * Math.PI) / 180;
+          c.strokeStyle = spd > 120 ? '#ff6b9a' : spd > 80 ? '#c9a6ff' : 'rgba(251,244,230,0.55)';
+          c.lineWidth = spd > 120 ? 2.4 : 1.4;
+          c.beginPath(); c.moveTo(x, y); c.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len); c.stroke();
+        }
+        c.fillStyle = CREAM;
+        const t = String(tspd);
+        const size = fit(c, t, 900, PW - 128, 330);
+        c.fillText(t, 54, y0 + h + 60 + size * 0.75);
+        font(c, 700, 40, 1);
+        c.fillText(`KNOTS · ${F.n0(tspd * 1.852)} KM/H`, 64, y0 + h + 120 + size * 0.75);
+        font(c, 500, 30, 0);
+        c.globalAlpha = 0.8;
+        c.fillText(`From ${F.heading(tdir)} at ${F.altitude(talt)}`, 64, y0 + h + 175 + size * 0.75);
+        c.globalAlpha = 1;
+        footer(c, [`${F.n0(ws.length)} airliners reporting the wind they fly`, 'through, in the last ten minutes.'], 'rgba(251,244,230,0.7)');
+      },
+    });
+  }
+
+  // 13. Disasters
   const dis = (world?.disasters ?? []).filter((d) => d.alert !== 'Green');
   if (dis.length) {
     const lead = [...dis].sort((a, b) => (a.alert === 'Red' ? -1 : 1) - (b.alert === 'Red' ? -1 : 1))[0];

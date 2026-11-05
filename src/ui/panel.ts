@@ -12,6 +12,7 @@ import * as F from '../lib/format.ts';
 import { aircraftPhoto, airframe, airline, checkRoute, route, shipFacts, type Route } from '../lib/enrich.ts';
 import { silhouetteSvg } from '../map/icons.ts';
 import { altColor } from '../map/colors.ts';
+import { isaTemp } from '../state/winds.ts';
 import { AIRPORTS, currentHistory, flyTo, getMap, issNow, onHistory, setRoute } from '../map/mapView.ts';
 
 const el = document.getElementById('panel')!;
@@ -143,6 +144,7 @@ function renderAircraft(a: Aircraft) {
       ${cell('ICAO address', hex.toUpperCase(), F.esc(r[A.type] ? `Type ${r[A.type]}` : ''))}
       ${cell('Last report', '', '', 'wide', 'age')}
     </div>
+    <div id="deck"></div>
     <div class="profile" id="profile"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
@@ -152,11 +154,14 @@ function renderAircraft(a: Aircraft) {
     <div class="prov" id="prov"></div>
   `);
   updateAircraft();
+  let n = 0;
   tick = window.setInterval(() => {
     const cur = app.selection && picture.aircraft.get(app.selection.id);
     if (!cur || renderedFor !== `air:${cur.id}`) return;
     updateAircraft();
+    if (++n % 5 === 0) loadDeck(cur);
   }, 1000);
+  loadDeck(a);
   drawProfile();
   enrichAircraft(a);
 }
@@ -195,6 +200,70 @@ function updateAircraft() {
       age > a.staleAfter ? ' <b>This track is stale.</b>' : ''}`;
   }
   if (currentRoute) drawRouteBlock(a, currentRoute);
+}
+
+// ---------------------------------------------------------------------------
+// The flight deck: what the aircraft's own systems broadcast (Mode S enhanced
+// surveillance and ADS-B v2): autopilot selections, air data, and the wind
+// and temperature it is flying through.
+
+const MODES: Record<string, string> = {
+  autopilot: 'Autopilot', vnav: 'VNAV', lnav: 'LNAV', althold: 'Altitude hold', approach: 'Approach', tcas: 'TCAS',
+};
+// ADS-B position accuracy category (NACp) → 95% containment radius.
+const NACP: Record<number, string> = {
+  11: '< 3 m', 10: '< 10 m', 9: '< 30 m', 8: '< 93 m', 7: '< 185 m', 6: '< 556 m', 5: '< 926 m', 4: '< 1.9 km', 3: '< 3.7 km', 2: '< 7.4 km', 1: '< 18.5 km',
+};
+
+async function loadDeck(a: Aircraft) {
+  const id = a.id;
+  let e: any = null;
+  try { e = await (await fetch(`/api/detail/air/${a.row[A.hex]}`)).json(); } catch { return; }
+  const box = el.querySelector<HTMLElement>('#deck');
+  if (!box || app.selection?.id !== id) return;
+  if (!e) { box.innerHTML = ''; return; }
+  const r = a.row;
+  const alt = r[A.alt] ?? 0;
+  const trk = r[A.trk];
+  const cells: string[] = [];
+  const sel = e.nav_altitude_fms ?? e.nav_altitude_mcp;
+  if (typeof sel === 'number') {
+    const diff = sel - alt;
+    const what = Math.abs(diff) < 300 ? 'holding it' : diff > 0 ? `climbing, ${F.n0(diff)} ft to go` : `descending, ${F.n0(-diff)} ft to go`;
+    cells.push(cell('Selected altitude', F.altitude(sel), what));
+  }
+  if (typeof e.nav_heading === 'number') cells.push(cell('Selected heading', F.heading(e.nav_heading), e.mag_heading != null ? `nose on ${F.heading(e.mag_heading)} magnetic` : ''));
+  if (typeof e.ias === 'number' || typeof e.tas === 'number') {
+    cells.push(cell('Airspeed', e.ias != null ? `${F.n0(e.ias)} kt` : `${F.n0(e.tas)} kt`, [e.ias != null ? 'indicated' : 'true', e.ias != null && e.tas != null ? `true ${F.n0(e.tas)} kt` : ''].filter(Boolean).join(' · ')));
+  }
+  if (typeof e.mach === 'number') cells.push(cell('Mach', e.mach.toFixed(2), `${F.n0(e.mach * 100)}% of local sound speed`));
+  if (typeof e.ws === 'number' && typeof e.wd === 'number') {
+    let comp = '';
+    if (trk !== null) {
+      const rad = ((e.wd - trk) * Math.PI) / 180;
+      const head = e.ws * Math.cos(rad); // + from ahead
+      const cross = e.ws * Math.sin(rad);
+      comp = `${Math.abs(head) >= 1 ? `${F.n0(Math.abs(head))} kt ${head > 0 ? 'head' : 'tail'}` : 'no head/tail'}${Math.abs(cross) >= 3 ? ` · ${F.n0(Math.abs(cross))} kt cross ${cross > 0 ? 'R' : 'L'}` : ''}`;
+    }
+    cells.push(cell('Wind outside', `${F.heading(e.wd)} at ${F.n0(e.ws)} kt`, comp));
+  }
+  if (typeof e.oat === 'number') {
+    const isa = isaTemp(alt);
+    const dev = e.oat - isa;
+    cells.push(cell('Outside air', `${e.oat} °C`, `ISA ${dev >= 0 ? '+' : '−'}${Math.abs(Math.round(dev))} °C${typeof e.tat === 'number' ? ` · total ${e.tat} °C` : ''}`));
+  }
+  if (typeof e.roll === 'number') {
+    const b = Math.abs(e.roll);
+    cells.push(cell('Bank', b < 2 ? 'Wings level' : `${Math.round(b)}° ${e.roll < 0 ? 'left' : 'right'}`, typeof e.track_rate === 'number' && Math.abs(e.track_rate) >= 0.1 ? `turning ${Math.abs(e.track_rate).toFixed(1)}°/s` : ''));
+  }
+  if (typeof e.nav_qnh === 'number') cells.push(cell('Altimeter set', `${e.nav_qnh.toFixed(0)} hPa`, Math.abs(e.nav_qnh - 1013.25) < 0.6 ? 'standard, flight levels' : 'local pressure'));
+  if (typeof e.nac_p === 'number' && NACP[e.nac_p]) cells.push(cell('Position accuracy', NACP[e.nac_p], `95% of the time · ADS-B v${e.version ?? '?'}`));
+  const modes = Array.isArray(e.nav_modes) ? (e.nav_modes as string[]).map((m) => MODES[m] ?? m) : [];
+  const age = Math.max(0, Date.now() / 1000 - e.t);
+  box.innerHTML = cells.length || modes.length ? `
+    <div class="deck-h"><span>On the flight deck</span><span>broadcast ${F.ago(age)}</span></div>
+    ${modes.length ? `<div class="deck-modes">${modes.map((m) => `<span class="chip">${F.esc(m)}</span>`).join('')}</div>` : ''}
+    <div class="grid deck">${cells.join('')}</div>` : '';
 }
 
 async function enrichAircraft(a: Aircraft) {
@@ -345,6 +414,7 @@ function renderShip(s: Ship) {
       ${cell('Size', r[S.len] ? `${r[S.len]} m` : '—', r[S.beam] ? `beam ${r[S.beam]} m` : '')}
       ${cell('Last report', '', '', 'wide', 'age')}
     </div>
+    <div id="owd"></div>
     <div id="wd"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
@@ -367,6 +437,20 @@ function renderShip(s: Ship) {
   upd();
   tick = window.setInterval(upd, 1000);
   const id = s.id;
+  fetch(`/api/detail/sea/${r[S.mmsi]}`).then((x) => x.json()).then((d: any) => {
+    if (!d || app.selection?.id !== id) return;
+    const p = d.particulars ?? {};
+    const bits = [
+      p.year_built && cell('Built', String(p.year_built), `${new Date().getUTCFullYear() - p.year_built} years old`),
+      p.gross_tonnage && cell('Gross tonnage', F.n0(p.gross_tonnage), 'enclosed volume'),
+      p.deadweight && cell('Deadweight', `${F.n0(p.deadweight)} t`, 'cargo, fuel and stores it can carry'),
+      (p.registry || p.home_port) && cell('Registry', F.esc(p.registry ?? '—'), F.esc(p.home_port ? `home port ${p.home_port}` : '')),
+      d.near && cell('Near', F.esc(d.near), 'nearest town or region'),
+      d.firstSeen && cell('First heard', new Date(d.firstSeen).toUTCString().slice(5, 16), 'by the Open Waters network'),
+    ].filter(Boolean);
+    const box = el.querySelector<HTMLElement>('#owd');
+    if (box && bits.length) box.innerHTML = `<div class="deck-h"><span>Particulars</span><span>registry data via Open Waters</span></div><div class="grid deck">${bits.join('')}</div>`;
+  }).catch(() => {});
   shipFacts(r[S.imo]).then((f) => {
     if (!f || app.selection?.id !== id) return;
     const wd = el.querySelector('#wd');
@@ -468,12 +552,43 @@ function renderAirport(icao: string) {
       ${cell('Elevation', elev !== null ? `${F.n0(elev)} ft` : '—', elev !== null ? `${F.n0(elev * 0.3048)} m` : '')}
       ${cell('Sun', light, `${sun.toFixed(1)}° elevation`)}
     </div>
+    <div id="metar"></div>
     <div class="actions">
       <button class="btn" data-act="fly" data-lon="${lon}" data-lat="${lat}" data-z="11">Zoom to field</button>
       <a class="btn" href="https://aviationweather.gov/data/metar/?ids=${code}&decoded=1" target="_blank" rel="noopener">Weather ↗</a>
     </div>
-    <div class="prov">Counts are from the aircraft currently on the map, so they depend on receiver coverage near the field. Airport data from OurAirports.</div>
+    <div class="prov">Counts are from the aircraft currently on the map, so they depend on receiver coverage near the field. Weather is the latest METAR via NOAA's Aviation Weather Center. Airport data from OurAirports.</div>
   `);
+  loadMetar(code);
+}
+
+// Flight categories as pilots use them, from ceiling and visibility.
+const CATS: Record<string, [string, string]> = {
+  VFR: ['#2f9e44', 'Visual flight rules'], MVFR: ['#1c7ed6', 'Marginal VFR'], IFR: ['#e03131', 'Instrument flight rules'], LIFR: ['#ae3ec9', 'Low IFR'],
+};
+const COVER: Record<string, string> = { SKC: 'Clear', CLR: 'Clear', NCD: 'No cloud', NSC: 'No significant cloud', CAVOK: 'Clear, visibility OK', FEW: 'Few', SCT: 'Scattered', BKN: 'Broken', OVC: 'Overcast', VV: 'Sky obscured' };
+
+async function loadMetar(icao: string) {
+  let m: any = null;
+  try { m = await (await fetch(`/api/metar/${icao}`)).json(); } catch { return; }
+  const box = el.querySelector<HTMLElement>('#metar');
+  if (!box || app.selection?.id !== icao || !m) return;
+  const cat = CATS[m.fltCat];
+  const clouds = (m.clouds ?? []).map((c: any) => `${COVER[c.cover] ?? c.cover}${c.base != null ? ` ${F.n0(c.base)} ft` : ''}`).join(', ') || COVER[m.cover] || '—';
+  const wind = m.wspd === 0 ? 'Calm' : `${m.wdir === 'VRB' ? 'Variable' : F.heading(Number(m.wdir))} at ${m.wspd} kt${m.wgst ? `, gusting ${m.wgst}` : ''}`;
+  const vis = m.visib === '10+' || m.visib === '6+' ? `${m.visib === '6+' ? '10 km' : '10 mi'} or more` : `${m.visib} mi`;
+  const age = (Date.now() / 1000 - m.obsTime);
+  box.innerHTML = `
+    <div class="deck-h"><span>Weather at the field</span><span>observed ${F.ago(age)}</span></div>
+    <div class="grid deck">
+      ${cell('Conditions', cat ? `<span class="cat" style="background:${cat[0]}">${F.esc(m.fltCat)}</span>` : '—', cat ? cat[1] : '')}
+      ${cell('Wind', F.esc(wind), m.wspd ? 'surface, magnetic' : '')}
+      ${cell('Visibility', F.esc(vis), '')}
+      ${cell('Cloud', F.esc(clouds), '')}
+      ${cell('Temperature', m.temp != null ? `${m.temp} °C` : '—', m.dewp != null ? `dew point ${m.dewp} °C` : '')}
+      ${cell('Pressure', m.altim != null ? `${Math.round(m.altim)} hPa` : '—', m.altim != null ? `${(m.altim * 0.02953).toFixed(2)} inHg` : '')}
+    </div>
+    <div class="metar-raw">${F.esc(m.rawOb ?? '')}</div>`;
 }
 
 function renderIss() {

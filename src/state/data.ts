@@ -199,6 +199,7 @@ export class Picture {
         this.ships.set(id, s);
       }
       s.row = r; s.still = still;
+      s.staleAfter = still ? 6 * 3600 : 900;
       s.lat = r[S.lat]; s.lon = r[S.lon]; s.posT = r[S.posT];
       s.speed = still || !plausible ? 0 : sog;
       s.course = r[S.cog] ?? r[S.hdg];

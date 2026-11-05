@@ -20,6 +20,14 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 - **Day and night**: the terminator plus civil, nautical and astronomical twilight, in 3° bands.
 - **Weather radar** (RainViewer), **airports** (3,300 with scheduled service) and **callsign labels**.
 
+**What the aircraft itself says.** Many airliners broadcast far more than position, and Watchman shows it: the altitude and heading set on the autopilot and whether it is climbing to it, the autopilot modes engaged (LNAV, VNAV, approach, TCAS), indicated and true airspeed and Mach, bank angle and turn rate, the altimeter setting, outside air temperature against the standard atmosphere, the wind it is flying through split into headwind and crosswind, and how accurate its position is.
+
+**Winds aloft** (`W`). Thousands of aircraft report the wind they measure; drawn together they show the jet streams live, with arrows that point downwind and grow and darken with speed. The Index has a jet stream poster with the strongest wind being measured anywhere.
+
+**Airport weather.** Click an airport for its latest METAR from NOAA's Aviation Weather Center, decoded: flight category, wind, visibility, cloud, temperature, dew point and pressure, alongside arrivals and departures on the map.
+
+**Ships, in depth.** Registry particulars (year built, gross tonnage, deadweight, registry and home port, nearest town) and the last day of track from Open Waters, plus photos and class from Wikidata.
+
 **The details sheet.** Click anything. For an aircraft: a photo of the actual airframe with the photographer's credit, its type, operator and registration, the country of registration from its ICAO address, the route with a progress bar, distance flown and to go and an arrival estimate, altitude (pressure and GNSS), vertical rate, ground speed, track, squawk, how its position was obtained (ADS-B, MLAT or TIS-B), report age, and an altitude and speed profile of its flight so far. For a ship: type, flag, destination and ETA, size, draught, rate of turn, and a photo and particulars from Wikidata when it has an IMO entry. Airports show live arrivals, departures and whether it is day or night there; earthquakes show depth, felt reports, tsunami flag and PAGER alert.
 
 **The Index** (`I`). The picture right now, as posters: aircraft aloft by altitude band, the highest and fastest aircraft, emergency squawks, the strongest earthquake of the week, the past day's quakes on a world map, where the sun is rising and setting, the ISS, ships under way, the busiest approach, military traffic, disaster alerts. They hang on cloth in WebGL, ripple, and bend as you scroll or drag through them. Click one to fly there.

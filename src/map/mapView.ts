@@ -12,6 +12,7 @@ import { bearing, destination, greatCircle, NM, distance } from '../../shared/ge
 import { nightPolygon } from '../../shared/sun.ts';
 import { paperStyle, PAPER, LABEL_FONT, LABEL_FONT_BOLD } from './style.ts';
 import { addIcons } from './icons.ts';
+import { loadWinds, onWinds, winds } from '../state/winds.ts';
 import { altColorExpr, altColor, EMERGENCY, INK, QUAKE, SHIP, SHIP_STILL } from './colors.ts';
 import { picture, type Aircraft, type Ship } from '../state/data.ts';
 import { app, type Selection } from '../state/app.ts';
@@ -253,6 +254,28 @@ function setup() {
     },
   });
 
+  // Winds aloft from aircraft reports: arrows point where the air is going,
+  // longer and darker as it blows harder; the strongest win the space.
+  addSource('winds');
+  map.addLayer({
+    id: 'winds', type: 'symbol', source: 'winds',
+    layout: {
+      'icon-image': 'arrow',
+      'icon-size': ['interpolate', ['linear'], ['get', 'ws'], 0, 0.28, 60, 0.45, 120, 0.68, 200, 0.9],
+      'icon-rotate': ['get', 'rot'],
+      'icon-rotation-alignment': 'map',
+      'icon-allow-overlap': true,
+      'symbol-sort-key': ['get', 'ws'],
+      'text-field': ['step', ['zoom'], '', 6, ['concat', ['to-string', ['get', 'ws']], ' kt']],
+      'text-font': LABEL_FONT_BOLD, 'text-size': 9, 'text-offset': [0, 1.3], 'text-optional': true,
+    },
+    paint: {
+      'icon-color': ['interpolate', ['linear'], ['get', 'ws'], 0, '#a7bcd3', 40, '#5f88bf', 80, '#2e55a6', 120, '#5a2da0', 170, '#a01f73'],
+      'icon-halo-color': PAPER.bg, 'icon-halo-width': 1,
+      'text-color': '#4b5f86', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.4,
+    },
+  });
+
   // Aircraft.
   addSource('aircraft');
   map.addLayer({
@@ -320,6 +343,12 @@ function setup() {
   app.on('filter', () => { needsFull = true; });
   updateNight();
   setInterval(updateNight, 60_000);
+  onWinds(drawWinds);
+  const pollWinds = () => { if (app.layers.winds) loadWinds(); else drawWinds(); };
+  app.on('layers', pollWinds);
+  map.on('zoomend', () => { if (app.layers.winds) drawWinds(); });
+  setInterval(pollWinds, 60_000);
+  pollWinds();
   loadRadar();
   setInterval(loadRadar, 5 * 60_000);
   picture.on((w) => { if (w === 'world') updateWorld(); if (w === 'sea') needsShips = true; });
@@ -354,6 +383,7 @@ const LAYER_GROUPS: Record<string, string[]> = {
   iss: ['iss', 'iss-track'],
   night: NIGHT_BANDS.map((d) => `night${d}`),
   trails: ['trail'],
+  winds: ['winds'],
 };
 
 function applyLayerVisibility() {
@@ -363,6 +393,27 @@ function applyLayerVisibility() {
   }
   if (map.getLayer('radar')) map.setLayoutProperty('radar', 'visibility', app.layers.radar ? 'visible' : 'none');
   needsFull = true;
+}
+
+/** One arrow per grid cell (the strongest report in it), sized to the zoom. */
+function drawWinds() {
+  if (!sources.winds) return;
+  const z = map.getZoom();
+  const cell = z < 3 ? 3 : z < 5 ? 1.2 : z < 7 ? 0.45 : 0.15;
+  const best = new Map<string, (typeof winds.reports)[number]>();
+  for (const w of winds.reports) {
+    const k = `${Math.floor(w[0] / cell)},${Math.floor(w[1] / cell)}`;
+    const cur = best.get(k);
+    if (!cur || w[3] > cur[3]) best.set(k, w);
+  }
+  sources.winds.setData(fc([...best.values()].map(([lat, lon, alt, ws, wd]) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] },
+    properties: { ws, rot: (wd + 180) % 360, alt },
+  }))));
+  // With winds on, traffic steps back so the wind field reads.
+  if (map.getLayer('aircraft')) {
+    map.setPaintProperty('aircraft', 'icon-opacity', app.layers.winds ? ['case', ['get', 'sel'], 1, 0.18] : ['case', ['get', 'stale'], 0.35, ['get', 'est'], 0.42, 1]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -639,7 +690,19 @@ async function loadSelectionExtras() {
   const id = sel.id;
   const url = sel.kind === 'air' ? `/api/history/air/${id.slice(2)}` : `/api/history/sea/${id.slice(2)}`;
   try {
-    const h = (await (await fetch(url)).json()) as HistoryPoint[];
+    let h = (await (await fetch(url)).json()) as HistoryPoint[];
+    if (sel.kind === 'sea') {
+      // Open Waters keeps a day of track for every ship it has heard; use it
+      // when it reaches further back than our own.
+      const d: any = await (await fetch(`/api/detail/sea/${id.slice(2)}`)).json().catch(() => null);
+      const tr = d?.track;
+      if (tr?.coords?.length > 1) {
+        const ow: HistoryPoint[] = tr.coords.map(([lon, lat]: [number, number], i: number) => ({
+          t: Date.parse(tr.times[i]) / 1000, lat, lon, alt: null, gs: tr.sog[i] ?? null,
+        })).filter((p: HistoryPoint) => isFinite(p.t));
+        if (ow.length && (!h.length || ow[0].t < h[0].t)) h = [...ow, ...h.filter((p) => p.t > ow[ow.length - 1].t)];
+      }
+    }
     if (app.selection?.id !== id) return;
     selHistory = h;
     selHistoryFor = id;

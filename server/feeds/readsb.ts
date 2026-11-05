@@ -74,10 +74,27 @@ export function parseReadsb(json: any, src: number, cadence: number): AircraftRe
       pia: (flags & 4) === 4,
       ladd: (flags & 8) === 8,
       emergency: a.emergency,
+      ext: extras(a as any),
       src,
       cadence,
     });
   }
+  return out;
+}
+
+/**
+ * What the aircraft says about itself beyond position (Mode S enhanced
+ * surveillance and ADS-B version 2): autopilot selections, air data, wind
+ * and temperature it measures, and how accurate its position is.
+ */
+const EXTRA_KEYS = [
+  'ias', 'tas', 'mach', 'oat', 'tat', 'ws', 'wd', 'roll', 'track_rate', 'mag_heading', 'true_heading', 'nav_qnh',
+  'nav_altitude_mcp', 'nav_altitude_fms', 'nav_heading', 'nav_modes', 'nac_p', 'nic', 'rssi', 'version', 'geom_rate',
+  'baro_rate', 'sil', 'gva', 'messages',
+] as const;
+function extras(a: Record<string, unknown>): Record<string, unknown> | undefined {
+  let out: Record<string, unknown> | undefined;
+  for (const k of EXTRA_KEYS) if (a[k] !== undefined && a[k] !== null) (out ??= {})[k] = a[k];
   return out;
 }
 

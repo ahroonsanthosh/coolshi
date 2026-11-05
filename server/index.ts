@@ -13,7 +13,7 @@ import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
 import { PROVIDERS, parseReadsb, type Provider } from './feeds/readsb.ts';
 import { Kystverket } from './feeds/kystverket.ts';
-import { OpenWaters } from './feeds/openwaters.ts';
+import { OpenWaters, shipDetail } from './feeds/openwaters.ts';
 import { sweepGrid } from './grid.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
@@ -74,7 +74,7 @@ setInterval(() => {
   const n = new Map<string, number>();
   for (const r of air.values()) if (r[10] && !(r[14] & 1)) n.set(r[10], (n.get(r[10]) ?? 0) + 1);
   const ranked = [...n.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t).filter((t) => /^[A-Z0-9]{2,4}$/.test(t));
-  topTypes = [...new Set([...ranked.slice(0, 60), ...SEED_TYPES])].slice(0, 70);
+  topTypes = [...new Set([...ranked.slice(0, 140), ...SEED_TYPES])].slice(0, 150);
 }, 300_000);
 const lastRun = new Map<string, number>();
 
@@ -236,6 +236,29 @@ async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, bod
   }
 }
 
+let windCache = { t: 0, v: [] as ReturnType<typeof air.winds> };
+function windsCached() {
+  if (Date.now() - windCache.t > 15_000) windCache = { t: Date.now(), v: air.winds() };
+  return windCache.v;
+}
+
+// Airport weather: the latest METAR from aviationweather.gov (NOAA), decoded
+// by them into fields, cached five minutes.
+const metarCache = new Map<string, { t: number; v: unknown }>();
+async function metar(icao: string): Promise<unknown> {
+  const c = metarCache.get(icao);
+  if (c && Date.now() - c.t < 300_000) return c.v;
+  try {
+    const { data } = await getJson<any[]>(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {}, 10_000);
+    const v = data?.[0] ?? null;
+    metarCache.set(icao, { t: Date.now(), v });
+    if (metarCache.size > 1000) metarCache.clear();
+    return v;
+  } catch {
+    return null;
+  }
+}
+
 let statsCache = { t: 0, v: sea.stats() };
 function shipStats() {
   if (Date.now() - statsCache.t > 20_000) statsCache = { t: Date.now(), v: sea.stats() };
@@ -277,7 +300,14 @@ const server = http.createServer(async (req, res) => {
       };
       return sendJson(req, res, body);
     }
-    let m = p.match(/^\/api\/history\/air\/([0-9a-f~]{6,7})$/i);
+    let m = p.match(/^\/api\/detail\/air\/([0-9a-f~]{6,7})$/i);
+    if (m) return sendJson(req, res, air.extras(m[1].toLowerCase()));
+    m = p.match(/^\/api\/detail\/sea\/(\d{6,9})$/);
+    if (m) return sendJson(req, res, await shipDetail(Number(m[1])));
+    if (p === '/api/winds') return sendJson(req, res, windsCached());
+    m = p.match(/^\/api\/metar\/([A-Z0-9]{3,4})$/i);
+    if (m) return sendJson(req, res, await metar(m[1].toUpperCase()));
+    m = p.match(/^\/api\/history\/air\/([0-9a-f~]{6,7})$/i);
     if (m) return sendJson(req, res, air.history(m[1].toLowerCase()));
     m = p.match(/^\/api\/history\/sea\/(\d{6,9})$/);
     if (m) return sendJson(req, res, sea.history(Number(m[1])));
