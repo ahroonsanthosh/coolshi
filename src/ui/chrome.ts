@@ -358,7 +358,7 @@ export function openAbout() {
           <h1>Watchfloor</h1>
           <p>A live picture of the planet’s traffic: every aircraft broadcasting ADS-B that a volunteer receiver can hear, ships reporting over AIS, earthquakes as they are recorded, disasters with an alert level, and the space station overhead.</p>
           <p>Nothing here is simulated. Each track is placed where it last reported and carried forward along its great circle at its reported speed until the next report: for 45 seconds when a nearby receiver hears it every few seconds, a little longer than the polling interval when only the worldwide feed sees it. Fade means stale. Routes are only drawn when the aircraft is actually flying them, because route databases are often wrong.</p>
-          <p>Coverage follows the volunteers. Europe and North America are dense; oceans, much of Africa and Central Asia are thin. Ships come from Finland’s open AIS network by default, so the Baltic is busy and the rest of the sea is quiet unless an AISStream key is set on the server.</p>
+          <p>Coverage follows the volunteers. Europe and North America are dense; oceans, much of Africa and Central Asia are thin. Ships come from the open AIS networks of Finland and Norway by default, so the Baltic, the Norwegian coast and the North Sea are busy and the rest of the sea is quiet unless an AISStream key is set on the server.</p>
           <h4>Keys</h4>
           <div class="keys">
             <kbd>/</kbd><span>Search tracks, ships, airports and earthquakes</span>

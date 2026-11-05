@@ -9,9 +9,10 @@ export const A = {
 /** Bit flags in A.flags */
 export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64 } as const;
 /** Source bit flags */
-export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16 } as const;
+export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64 } as const;
 export const SRC_NAMES: Record<number, string> = {
   1: 'OpenSky Network', 2: 'adsb.fi', 4: 'adsb.lol', 8: 'Fintraffic Digitraffic', 16: 'AISStream',
+  32: 'airplanes.live', 64: 'Kystverket (Norway)',
 };
 
 export type AircraftRow = [

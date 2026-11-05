@@ -88,7 +88,16 @@ Everything is optional; copy `.env.example` to `.env`.
 | `AISSTREAM_API_KEY` | Worldwide ships from AISStream (free key at aisstream.io). Without it, ships come from Fintraffic's open feed for the Baltic. |
 | `PORT` | Port for the aggregator and the built site (default 8080). |
 
-When OpenSky is out of credits or down, the server automatically sweeps the 45 busiest airspaces through adsb.fi and adsb.lol instead, and the status line says `Live · regional`.
+### Free coverage, no keys
+
+Without any keys, Watchfloor combines:
+
+- **OpenSky** for a worldwide aircraft snapshot (anonymous allowance).
+- **A worldwide sweep** across three volunteer ADS-B networks (adsb.fi, adsb.lol, airplanes.live): 349 circles of 250 nm placed wherever there are scheduled airports, busiest airspace every two minutes, the rest every five, each network kept under its published rate limit. It fills what OpenSky misses and carries the whole picture when OpenSky's credits run out (the status line then says `Live · regional`).
+- **Your view**, refreshed every five seconds from the same networks, plus worldwide military aircraft and emergency squawks.
+- **Ships** from Fintraffic (Baltic) and Kystverket (the whole Norwegian coast, the North Sea approaches and Svalbard), both open data.
+
+For worldwide ships, add a free AISStream key. Some networks refuse requests from cloud servers; a refused feed backs off for an hour and the About page shows it, so check there after deploying.
 
 ## How it works
 
@@ -124,4 +133,4 @@ Links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) open with that trac
 
 ## Data and credits
 
-OpenSky Network; adsb.fi; adsb.lol; Fintraffic Digitraffic (CC BY 4.0); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.
+OpenSky Network; adsb.fi; adsb.lol; airplanes.live; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.

@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { AirStore, SeaStore, type AircraftReport } from './store.ts';
 import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
-import { PROVIDERS, parseReadsb } from './feeds/readsb.ts';
+import { PROVIDERS, parseReadsb, type Provider } from './feeds/readsb.ts';
+import { Kystverket } from './feeds/kystverket.ts';
+import { sweepGrid } from './grid.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
@@ -36,6 +38,7 @@ const sea = new SeaStore();
 const opensky = new OpenSky();
 const digitraffic = new Digitraffic();
 const aisstream = new AisStream();
+const kystverket = new Kystverket();
 const usgs = new Usgs();
 const gdacs = new Gdacs();
 const iss = new Iss();
@@ -55,15 +58,7 @@ const watching = () => [...views.values()].some((v) => Date.now() - v.seen < 60_
 type Job = { key: string; url: (p: typeof PROVIDERS.adsbfi) => string; cadence: number; due: number };
 const lastRun = new Map<string, number>();
 
-const HUBS: [number, number][] = [
-  [51.5, -0.4], [49.0, 2.5], [50.0, 8.6], [52.3, 4.8], [40.5, -3.6], [41.8, 12.3], [41.2, 28.8],
-  [55.9, 37.4], [59.6, 17.9], [52.2, 21.0], [25.2, 55.4], [28.6, 77.1], [19.1, 72.9], [13.7, 100.7],
-  [1.4, 104.0], [22.3, 113.9], [31.1, 121.8], [40.1, 116.6], [35.6, 139.8], [37.5, 126.8],
-  [-6.1, 106.7], [-33.9, 151.2], [-37.7, 144.8], [-26.1, 28.2], [30.1, 31.4], [6.6, 3.3], [-1.3, 36.9],
-  [-23.4, -46.5], [4.7, -74.1], [19.4, -99.1], [40.6, -73.8], [42.0, -87.9], [33.6, -84.4],
-  [32.9, -97.0], [39.9, -104.7], [33.9, -118.4], [37.6, -122.4], [47.4, -122.3], [43.7, -79.6],
-  [25.8, -80.3], [21.3, -157.9], [61.2, -150.0], [64.1, -21.9], [53.4, -6.3], [38.8, -9.1],
-];
+const SWEEP = sweepGrid(join(ROOT, 'src/data/airports.json'));
 
 function viewPoints(v: View): { lat: number; lon: number; r: number }[] {
   if (v.r <= 250) return [{ lat: v.lat, lon: v.lon, r: Math.max(25, Math.min(250, v.r * 1.1)) }];
@@ -76,7 +71,7 @@ function viewPoints(v: View): { lat: number; lon: number; r: number }[] {
   return pts;
 }
 
-function nextJob(lane: 'adsbfi' | 'adsblol', now: number): Job | null {
+function nextJob(lane: Provider, now: number): Job | null {
   const jobs: Job[] = [];
   // 1. What people are looking at, refreshed every ~5 s.
   const pts: { lat: number; lon: number; r: number }[] = [];
@@ -95,26 +90,29 @@ function nextJob(lane: 'adsbfi' | 'adsblol', now: number): Job | null {
   for (const s of ['7700', '7600', '7500']) {
     jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000 });
   }
-  // 3. Without OpenSky's world picture, sweep the busiest airspace instead.
-  if (!opensky.healthy) {
-    for (const [lat, lon] of HUBS) {
-      const key = `hub:${lat},${lon}`;
-      jobs.push({ key, url: (P) => P.point(lat, lon, 250), cadence: 90, due: (lastRun.get(key) ?? 0) + 70_000 });
-    }
+  // 3. Sweep the world, busiest airspace most often. This fills in what
+  // OpenSky misses and carries the whole picture when its credits run out.
+  const fast = opensky.healthy ? 120_000 : 75_000;
+  for (const p of SWEEP) {
+    const key = `sw:${p.lat},${p.lon}`;
+    const busy = p.weight >= 5;
+    jobs.push({ key, url: (P) => P.point(p.lat, p.lon, 250), cadence: busy ? fast / 800 : 330, due: (lastRun.get(key) ?? 0) + (busy ? fast : 300_000) });
   }
   const ready = jobs.filter((j) => j.due <= now).sort((a, b) => a.due - b.due);
   void lane;
   return ready[0] ?? null;
 }
 
-const laneStatus = {
+const laneStatus: Record<Provider, Status> = {
   adsbfi: new Status('adsbfi', 'adsb.fi', 'air', 1.5),
   adsblol: new Status('adsblol', 'adsb.lol', 'air', 1.5),
+  airplaneslive: new Status('airplaneslive', 'airplanes.live', 'air', 1.5),
 };
 
-function startLane(lane: 'adsbfi' | 'adsblol', offsetMs: number, gapS: number) {
-  const src = lane === 'adsbfi' ? SRC.adsbfi : SRC.adsblol;
+function startLane(lane: Provider, offsetMs: number, gapS: number) {
+  const src = SRC[lane];
   let backoff = 0;
+  let refused = 0;
   laneStatus[lane].interval = gapS;
   setTimeout(() => every(() => gapS, async () => {
     if (!watching()) return 2;
@@ -127,13 +125,17 @@ function startLane(lane: 'adsbfi' | 'adsblol', offsetMs: number, gapS: number) {
       const { data } = await getJson<any>(job.url(PROVIDERS[lane]), {}, 15_000);
       const reports = parseReadsb(data, src, job.cadence);
       for (const r of reports) air.ingest(r);
-      laneStatus[lane].success(reports.length, 'viewport detail, military, emergencies');
+      refused = 0;
+      laneStatus[lane].success(reports.length, 'your view, worldwide sweep, military, emergencies');
     } catch (e) {
       lastRun.set(job.key, now - 4000); // let the other lane retry it
       laneStatus[lane].fail(e);
       const s = e instanceof HttpError ? e.status : 0;
       if (s === 429) backoff = Date.now() + Math.max(60, (e as HttpError).retryAfter ?? 0) * 1000;
-      else if (s >= 500 || !s) backoff = Date.now() + 10_000;
+      else if (s === 401 || s === 403) {
+        // Some networks refuse cloud servers; stop asking for an hour.
+        if (++refused >= 5) { backoff = Date.now() + 3_600_000; laneStatus[lane].fail(e, 'refused from this server; retrying hourly'); }
+      } else if (s >= 500 || !s) backoff = Date.now() + 10_000;
     }
   }), offsetMs);
 }
@@ -142,12 +144,16 @@ function startLane(lane: 'adsbfi' | 'adsblol', offsetMs: number, gapS: number) {
 // Feed schedule
 
 every(() => opensky.pollS, async () => {
+  if (process.env.OPENSKY === 'off') { opensky.status.note = 'off'; return 3600; }
   if (!watching()) return 5;
   return opensky.poll(ingestAir);
 });
-// adsb.fi documents one request a second; adsb.lol asks for restraint.
-startLane('adsbfi', 300, 1.3);
-startLane('adsblol', 1050, 3);
+// adsb.fi and airplanes.live document one request a second; adsb.lol asks
+// for restraint. Each lane stays under its network's limit.
+startLane('adsbfi', 300, 1.15);
+startLane('adsblol', 1050, 2.5);
+startLane('airplaneslive', 700, 1.15);
+kystverket.start((r) => sea.ingest(r));
 every(() => 20, () => digitraffic.pollLocations((r) => sea.ingest(r)));
 every(() => 600, () => digitraffic.pollMetadata((r) => sea.ingest(r)));
 aisstream.start((r) => sea.ingest(r));
@@ -184,7 +190,7 @@ async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, bod
 }
 
 function sources() {
-  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, digitraffic.status, aisstream.status, usgs.status, gdacs.status, iss.status]
+  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, digitraffic.status, kystverket.status, aisstream.status, usgs.status, gdacs.status, iss.status]
     .map((s) => s.toJSON());
 }
 

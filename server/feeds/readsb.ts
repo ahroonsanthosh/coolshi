@@ -94,6 +94,13 @@ export const PROVIDERS = {
     mil: 'https://api.adsb.lol/v2/mil',
     sqk: (s: string) => `https://api.adsb.lol/v2/sqk/${s}`,
   },
+  airplaneslive: {
+    point: (lat: number, lon: number, nm: number) =>
+      `https://api.airplanes.live/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${Math.round(nm)}`,
+    mil: 'https://api.airplanes.live/v2/mil',
+    sqk: (s: string) => `https://api.airplanes.live/v2/squawk/${s}`,
+  },
 };
+export type Provider = keyof typeof PROVIDERS;
 
 export { KM_PER_NM };
