@@ -1,0 +1,22 @@
+# One-click deploy on Render: https://render.com/deploy?repo=https://github.com/ahroonsanthosh/coolshi
+services:
+  - type: web
+    name: watchfloor
+    runtime: node
+    plan: free
+    branch: claude/practical-mccarthy-yfijni
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node server/index.ts
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 22.20.0
+      - key: NODE_ENV
+        value: production
+      # Optional, set in the Render dashboard if you have them:
+      - key: OPENSKY_CLIENT_ID
+        sync: false
+      - key: OPENSKY_CLIENT_SECRET
+        sync: false
+      - key: AISSTREAM_API_KEY
+        sync: false

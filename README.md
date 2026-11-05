@@ -45,6 +45,12 @@ This is where most of the work went.
 
 `npm test` covers the geodesy, solar position, feed parsing, merging, emergency confirmation and route verification.
 
+## Deploy
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ahroonsanthosh/coolshi)
+
+Watchfloor needs a small always-on Node server (most of its sources don't allow direct browser requests), so it can't run on static hosting like GitHub Pages. The button above deploys `render.yaml` to Render's free tier; any container host works with the `Dockerfile`. On Render's free plan the service sleeps after 15 minutes without visitors and takes about a minute to wake.
+
 ## Running it
 
 Requires Node.js 22.18 or newer (the server is TypeScript run directly by Node).
