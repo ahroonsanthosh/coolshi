@@ -1,7 +1,7 @@
 // The picture right now, as posters. Each one is a single fact pulled from
 // live data and set in big type, with the evidence printed underneath.
 
-import { A, AF, S } from '../../shared/protocol.ts';
+import { A, AF } from '../../shared/protocol.ts';
 import { distance } from '../../shared/geo.ts';
 import { sunElevation, subsolarPoint } from '../../shared/sun.ts';
 import { picture, reportAge, type Aircraft } from '../state/data.ts';
@@ -453,44 +453,38 @@ export function buildPosters(): Poster[] {
     });
   }
 
-  // 9. Ships
-  if (picture.ships.size) {
-    let moving = 0, still = 0;
-    let biggest: { name: string; len: number; type: string; id: string; lon: number; lat: number } | null = null;
-    const groups: Record<string, number> = {};
-    for (const s of picture.ships.values()) {
-      if (s.still) still++; else moving++;
-      const t = shipType(s.row[S.type]);
-      groups[t.group] = (groups[t.group] ?? 0) + 1;
-      const len = s.row[S.len] ?? 0;
-      if (len > (biggest?.len ?? 0) && len < 460 && s.row[S.name]) biggest = { name: s.row[S.name], len, type: t.label, id: s.id, lon: s.x, lat: s.y };
-    }
-    const b = biggest;
+  // 9. Ships, worldwide totals from the server
+  const st = picture.world?.ships;
+  if (st && st.total) {
+    const moving = st.moving, still = st.total - st.moving;
+    const L = st.largest;
+    const lt = L ? shipType(L.type).label : '';
     posters.push({
-      key: 'ships', title: `${F.n0(moving)} ships under way`, subtitle: `${F.n0(still)} moored or at anchor${b ? ` · largest: ${b.name}, ${b.len} m` : ''}`,
-      target: b ? { kind: 'sea', id: b.id, lon: b.lon, lat: b.lat, zoom: 8 } : { kind: 'none', id: '', lon: 22, lat: 59, zoom: 5 },
+      key: 'ships', title: `${F.n0(moving)} ships under way`, subtitle: `${F.n0(still)} moored, anchored or drifting${L ? ` · largest: ${L.name}, ${L.len} m` : ''}`,
+      target: L ? { kind: 'sea', id: `s:${L.mmsi}`, lon: L.lon, lat: L.lat, zoom: 8 } : { kind: 'none', id: '', lon: 5, lat: 50, zoom: 4 },
       draw: (c) => {
         bg(c, '#0d8a7c');
         header(c, 'At sea', nowUtc(), CREAM);
         c.fillStyle = CREAM;
-        // Hulls in a grid, one per 25 ships under way
-        const n = Math.min(120, Math.ceil(moving / 25));
+        // Hulls in a grid, each one 1% of the ships under way
+        const per = Math.max(1, Math.ceil(moving / 100));
+        const n = Math.min(108, Math.ceil(moving / per));
         for (let i = 0; i < n; i++) {
           const col = i % 12, row = Math.floor(i / 12);
-          drawSilhouette(c, 'ship', 100 + col * 72, 210 + row * 70, 56, 90);
+          drawSilhouette(c, 'ship', 100 + col * 72, 210 + row * 64, 50, 90);
         }
         const t = F.n0(moving);
         fit(c, t, 900, PW - 128, 300);
         c.fillText(t, 54, 900);
         font(c, 700, 40, 1);
         c.fillText('UNDER WAY', 64, 970);
-        if (b) {
+        if (L) {
           font(c, 500, 32, 0);
           c.globalAlpha = 0.85;
-          wrap(c, `Largest: ${b.name}, ${b.type.toLowerCase()}, ${b.len} m long.`, 64, 1050, PW - 128, 42, 2);
+          wrap(c, `Largest: ${L.name}, ${lt.toLowerCase()}, ${L.len} m long.`, 64, 1050, PW - 128, 42, 2);
           c.globalAlpha = 1;
         }
-        footer(c, ['Each hull is 25 ships. AIS from the Baltic', 'and every network the server can hear.'], CREAM);
+        footer(c, [`Each hull is ${F.n0(per)} ship${per > 1 ? 's' : ''}. AIS heard by coastal receivers`, 'worldwide, from open networks.'], CREAM);
       },
     });
   }

@@ -9,10 +9,10 @@ export const A = {
 /** Bit flags in A.flags */
 export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64, est: 128 } as const;
 /** Source bit flags */
-export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64, adsbone: 128 } as const;
+export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64, adsbone: 128, openwaters: 256 } as const;
 export const SRC_NAMES: Record<number, string> = {
   1: 'OpenSky Network', 2: 'adsb.fi', 4: 'adsb.lol', 8: 'Fintraffic Digitraffic', 16: 'AISStream',
-  32: 'airplanes.live', 64: 'Kystverket (Norway)', 128: 'adsb.one',
+  32: 'airplanes.live', 64: 'Kystverket (Norway)', 128: 'adsb.one', 256: 'Open Waters AIS',
 };
 
 export type AircraftRow = [
@@ -28,13 +28,15 @@ export type AircraftRow = [
 /** Ship row. Units: kt, degrees true, metres, seconds since epoch. */
 export const S = {
   mmsi: 0, lat: 1, lon: 2, posT: 3, sog: 4, cog: 5, hdg: 6, nav: 7, name: 8, callsign: 9, imo: 10, type: 11,
-  dest: 12, eta: 13, draught: 14, len: 15, beam: 16, src: 17, rot: 18,
+  dest: 12, eta: 13, draught: 14, len: 15, beam: 16, src: 17, rot: 18, via: 19, flag: 20,
 } as const;
 export type ShipRow = [
   mmsi: number, lat: number, lon: number, posT: number, sog: number | null, cog: number | null,
   hdg: number | null, nav: number, name: string, callsign: string, imo: number, type: number,
   dest: string, eta: string, draught: number | null, len: number | null, beam: number | null, src: number,
   rot: number | null,
+  /** Upstream network that relayed it (for attribution), and ISO flag code. */
+  via: string, flag: string,
 ];
 
 export interface Delta<R> {
@@ -62,5 +64,7 @@ export interface WorldPayload {
   disasters: Disaster[];
   iss: { t: number; lat: number; lon: number; alt: number; vel: number }[];
   sources: SourceStatus[];
+  /** Whole-world ship totals (the browser only receives ships in view). */
+  ships: { total: number; moving: number; largest: { name: string; len: number; type: number; mmsi: number; lat: number; lon: number } | null };
 }
 export interface HistoryPoint { t: number; lat: number; lon: number; alt: number | null; gs: number | null }

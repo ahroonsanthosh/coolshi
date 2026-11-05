@@ -564,7 +564,7 @@ function drawTracks(z: number) {
   visibleAir = ca;
   visibleSea = cs;
   counts.air = ca; counts.sea = cs;
-  counts.airAll = picture.aircraft.size; counts.seaAll = picture.ships.size;
+  counts.airAll = picture.aircraft.size; counts.seaAll = picture.world?.ships?.total ?? picture.ships.size;
   sources.aircraft.setData(fc(air));
   sources.ships.setData(fc(sea));
   sources.labels.setData(fc(labels));
@@ -787,7 +787,17 @@ function reportView() {
     distance(c.lat, c.lng, b.getNorth(), c.lng),
     distance(c.lat, c.lng, c.lat, b.getEast()),
   ) / NM;
-  picture.view = { lat: c.lat, lon: c.lng, r: map.getZoom() < 3 ? 5000 : Math.min(5000, r) };
+  // Ships come per view; with margin so a small pan doesn't empty the edges.
+  let bbox: [number, number, number, number] | null = null;
+  if (map.getZoom() >= 3) {
+    const w = b.getWest(), e = b.getEast(), padX = (e - w) * 0.25, padY = (b.getNorth() - b.getSouth()) * 0.25;
+    if (e - w + 2 * padX < 360) {
+      const norm = (x: number) => ((((x + 180) % 360) + 360) % 360) - 180;
+      bbox = [norm(w - padX), Math.max(-90, b.getSouth() - padY), norm(e + padX), Math.min(90, b.getNorth() + padY)];
+    }
+  }
+  picture.view = { lat: c.lat, lon: c.lng, r: map.getZoom() < 3 ? 5000 : Math.min(5000, r), bbox };
+  picture.refreshSea();
 }
 
 // ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ export function initCaption() {
       const d = describe(target.kind, target.id);
       if (d) return set(d[0], d[1], true);
     }
-    const n = picture.aircraft.size, m = picture.ships.size;
+    const n = picture.aircraft.size, m = picture.world?.ships?.total ?? picture.ships.size;
     if (!n && !m) return set('Listening…', 'gathering the world’s transponders', false);
     let airborne = 0, est = 0;
     for (const a of picture.aircraft.values()) {
@@ -138,7 +138,7 @@ export function initStatus() {
 
 const LAYER_INFO: [LayerKey, string, string, string][] = [
   ['aircraft', 'Aircraft', 'Coloured by altitude; shape by type', ''],
-  ['ships', 'Ships', 'Teal when under way, pale when moored or anchored', ''],
+  ['ships', 'Ships', 'Teal when under way, pale when moored or anchored. Those in view, up to 12,000', ''],
   ['labels', 'Labels', 'Callsigns and names when zoomed in', ''],
   ['trails', 'Trail', 'Where the selected track has been', 'T'],
   ['airports', 'Airports', '3,300 with scheduled service', 'A'],
@@ -173,7 +173,7 @@ function drawLayers() {
     if (a.row[A.flags] & AF.ground) n.ground = (n.ground ?? 0) + 1;
   }
   const lc: Partial<Record<LayerKey, number>> = {
-    aircraft: picture.aircraft.size, ships: picture.ships.size, quakes: picture.world?.quakes.length,
+    aircraft: picture.aircraft.size, ships: picture.world?.ships?.total ?? picture.ships.size, quakes: picture.world?.quakes.length,
     disasters: picture.world?.disasters.length, airports: AIRPORTS.length,
   };
   el.innerHTML = `
@@ -362,7 +362,7 @@ export function openAbout() {
           <h1>Watchfloor</h1>
           <p>A live picture of the planet’s traffic: every aircraft broadcasting ADS-B that a volunteer receiver can hear, ships reporting over AIS, earthquakes as they are recorded, disasters with an alert level, and the space station overhead.</p>
           <p>Nothing here is simulated. Each track is placed where it last reported and carried forward along its great circle at its reported speed until the next report: for 45 seconds when a nearby receiver hears it every few seconds, a little longer than the polling interval when only the worldwide feed sees it. Fade means stale. Over oceans and other gaps, airliners on a verified route are carried on as faded, clearly labelled estimates until receivers near their destination hear them again. Routes are only drawn when the aircraft is actually flying them, because route databases are often wrong.</p>
-          <p>Coverage follows the volunteers. Europe and North America are dense; oceans, much of Africa and Central Asia are thin. Ships come from the open AIS networks of Finland and Norway by default, so the Baltic, the Norwegian coast and the North Sea are busy and the rest of the sea is quiet unless an AISStream key is set on the server.</p>
+          <p>Coverage follows the volunteers. Europe and North America are dense; oceans, much of Africa and Central Asia are thin. Ships come from Open Waters AIS, an open network that merges government feeds, AISHub, aisstream.io and volunteer receivers, plus Finland's and Norway's own feeds. That covers most coasts and busy straits; the open ocean is out of reach of coastal receivers, so ships there appear when they near land.</p>
           <h4>Keys</h4>
           <div class="keys">
             <kbd>/</kbd><span>Search tracks, ships, airports and earthquakes</span>
@@ -387,6 +387,7 @@ export function openAbout() {
           <div class="src"><span class="dot"></span><span class="nm">Planespotters.net, adsbdb</span><span class="age">on demand</span><span class="meta">aircraft photos, airframes and filed routes</span></div>
           <div class="src"><span class="dot"></span><span class="nm">Wikidata, Wikimedia Commons</span><span class="age">on demand</span><span class="meta">ship particulars and photos, matched by IMO number</span></div>
           <div class="src"><span class="dot"></span><span class="nm">OpenFreeMap, OpenStreetMap, Natural Earth</span><span class="age"></span><span class="meta">basemap and relief</span></div>
+          <div class="src"><span class="dot"></span><span class="nm">Ship data credits</span><span class="age"></span><span class="meta">Open Waters AIS (openwaters.io/ais), AISHub (aishub.net), aisstream.io, data delivered by BarentsWatch; contains data under the Norwegian licence for Open Government data (NLOD) distributed by the Norwegian Coastal Administration; Fintraffic / digitraffic.fi, CC BY 4.0</span></div>
           <div class="src"><span class="dot"></span><span class="nm">tar1090 aircraft database</span><span class="age">weekly</span><span class="meta">registration, type and operator for 620,000 airframes (Mictronics, wiedehopf)</span></div>
           <div class="src"><span class="dot"></span><span class="nm">OurAirports, ICAO, ITU</span><span class="age"></span><span class="meta">airports, address blocks by state, maritime identification digits</span></div>
           <h4>Units</h4>

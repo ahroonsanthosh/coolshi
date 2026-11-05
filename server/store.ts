@@ -219,6 +219,8 @@ export interface ShipReport {
   draught?: number | null;
   len?: number | null;
   beam?: number | null;
+  via?: string;
+  flag?: string;
   src: number;
 }
 
@@ -246,7 +248,7 @@ export class SeaStore {
         return;
       }
       s = {
-        row: [r.mmsi, r.lat!, r.lon!, 0, null, null, null, 15, '', '', 0, 0, '', '', null, null, null, 0, null],
+        row: [r.mmsi, r.lat!, r.lon!, 0, null, null, null, 15, '', '', 0, 0, '', '', null, null, null, 0, null, '', ''],
         upd: now, hist: [],
       };
       this.map.set(r.mmsi, s);
@@ -281,8 +283,12 @@ export class SeaStore {
     if (r.dest) row[12] = r.dest;
     if (r.eta) row[13] = r.eta;
     if (r.draught != null) row[14] = r.draught;
-    if (r.len) row[15] = r.len;
-    if (r.beam) row[16] = r.beam;
+    // AIS caps each hull dimension (511 m bow/stern, 63 m port/starboard)
+    // and crews mistype them; no ship exceeds ~460 m by 70 m.
+    if (r.len && r.len <= 460) row[15] = r.len;
+    if (r.beam && r.beam <= 70) row[16] = r.beam;
+    if (r.via) row[19] = r.via;
+    if (r.flag) row[20] = r.flag;
   }
 
   sweep(now = Date.now()) {
@@ -294,6 +300,41 @@ export class SeaStore {
     }
     for (const [k, t] of this.tomb) if (now - t > 600_000) this.tomb.delete(k);
     if (this.pending.size > 50_000) this.pending.clear();
+  }
+
+  /**
+   * Ships inside a box ([west, south, east, north], may cross the
+   * antimeridian), at most `cap` of them: the selected ship, then those under
+   * way, then the largest. A world of ships is too much for one browser.
+   */
+  inView(box: [number, number, number, number] | null, cap: number, sel: number): ShipRow[] {
+    const [w, so, e, n] = box ?? [-180, -90, 180, 90];
+    const inLon = (lon: number) => (w <= e ? lon >= w && lon <= e : lon >= w || lon <= e);
+    const hit: ShipRow[] = [];
+    for (const s of this.map.values()) {
+      const r = s.row;
+      if (r[0] === sel || (r[1] >= so && r[1] <= n && inLon(r[2]))) hit.push(r);
+    }
+    if (hit.length <= cap) return hit;
+    const score = (r: ShipRow) => (r[0] === sel ? 1e9 : 0) + ((r[4] ?? 0) >= 1 ? 1e6 : 0) + (r[15] ?? 0);
+    return hit.sort((a, b) => score(b) - score(a)).slice(0, cap);
+  }
+
+  stats() {
+    let moving = 0;
+    let largest: ShipRow | null = null;
+    for (const s of this.map.values()) {
+      const r = s.row;
+      if ((r[4] ?? 0) >= 1 && r[7] !== 1 && r[7] !== 5) moving++;
+      // Largest merchant ship, ignoring sizes no ship has (crews mistype them):
+      // passenger, cargo or tanker, and within the 400 m of today's giants.
+      const len = r[15] ?? 0, t = r[11];
+      if (r[8] && t >= 60 && t <= 89 && len <= 400 && (r[16] ?? 0) <= 66 && len > (largest?.[15] ?? 0)) largest = r;
+    }
+    return {
+      total: this.map.size, moving,
+      largest: largest ? { name: largest[8], len: largest[15]!, type: largest[11], mmsi: largest[0], lat: largest[1], lon: largest[2] } : null,
+    };
   }
 
   delta(since: number, now = Date.now()): Delta<ShipRow> {

@@ -13,6 +13,7 @@ import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
 import { PROVIDERS, parseReadsb, type Provider } from './feeds/readsb.ts';
 import { Kystverket } from './feeds/kystverket.ts';
+import { OpenWaters } from './feeds/openwaters.ts';
 import { sweepGrid } from './grid.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
@@ -43,6 +44,8 @@ const opensky = new OpenSky();
 const digitraffic = new Digitraffic();
 const aisstream = new AisStream();
 const kystverket = new Kystverket();
+const airportPts = (JSON.parse(readFileSync(join(ROOT, 'src/data/airports.json'), 'utf8')) as any[]).map((a) => [a[5], a[6]] as [number, number]);
+const openwaters = new OpenWaters(airportPts);
 const usgs = new Usgs();
 const gdacs = new Gdacs();
 const iss = new Iss();
@@ -160,6 +163,24 @@ startLane('adsblol', 1050, 2.5);
 startLane('airplaneslive', 700, 1.15);
 startLane('adsbone', 900, 1.5);
 kystverket.start((r) => sea.ingest(r));
+every(() => 1.3, async () => {
+  if (process.env.OPENWATERS === 'off') return 3600;
+  if (!watching()) return 5;
+  // Viewers' views first: the 10° boxes their screens overlap, if few.
+  const focus: { s: number; w: number; n: number; e: number }[] = [];
+  for (const v of views.values()) {
+    if (Date.now() - v.seen > 30_000 || v.r > 700) continue;
+    const dLat = v.r / 60, dLon = v.r / 60 / Math.max(0.2, Math.cos((v.lat * Math.PI) / 180));
+    for (let s = Math.floor((v.lat - dLat) / 10) * 10; s < v.lat + dLat; s += 10) {
+      for (let w = Math.floor((v.lon - dLon) / 10) * 10; w < v.lon + dLon; w += 10) {
+        if (s >= -90 && s < 90 && focus.length < 6) focus.push({ s, w: ((w + 540) % 360) - 180, n: Math.min(90, s + 10), e: ((w + 540) % 360) - 170 });
+      }
+    }
+  }
+  openwaters.focus = focus;
+  openwaters.ships = sea.size;
+  return openwaters.tick((r) => sea.ingest(r));
+});
 every(() => 20, () => digitraffic.pollLocations((r) => sea.ingest(r)));
 every(() => 600, () => digitraffic.pollMetadata((r) => sea.ingest(r)));
 aisstream.start((r) => sea.ingest(r));
@@ -195,12 +216,18 @@ async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, bod
   }
 }
 
+let statsCache = { t: 0, v: sea.stats() };
+function shipStats() {
+  if (Date.now() - statsCache.t > 20_000) statsCache = { t: Date.now(), v: sea.stats() };
+  return statsCache.v;
+}
+
 function sources() {
   let est = 0;
   for (const r of air.values()) if (r[14] & AF.est) est++;
   estimator.status.count = est;
   estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
-  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, digitraffic.status, kystverket.status, aisstream.status, usgs.status, gdacs.status, iss.status]
+  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, aisstream.status, usgs.status, gdacs.status, iss.status]
     .map((s) => s.toJSON());
 }
 
@@ -216,10 +243,17 @@ const server = http.createServer(async (req, res) => {
       }
       return sendJson(req, res, air.delta(Number(url.searchParams.get('since')) || 0));
     }
-    if (p === '/api/sea') return sendJson(req, res, sea.delta(Number(url.searchParams.get('since')) || 0));
+    if (p === '/api/sea') {
+      // The ships in the viewer's box (or the busiest of them), whole each time.
+      const b = url.searchParams.get('bbox')?.split(',').map(Number);
+      const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
+      const rows = sea.inView(box, box ? 12_000 : 5_000, Number(url.searchParams.get('sel')) || 0);
+      return sendJson(req, res, { now: Date.now(), full: true, rows, removed: [] });
+    }
     if (p === '/api/world') {
       const body: WorldPayload = {
         now: Date.now(), quakes: usgs.quakes, disasters: gdacs.events, iss: iss.track, sources: sources(),
+        ships: shipStats(),
       };
       return sendJson(req, res, body);
     }

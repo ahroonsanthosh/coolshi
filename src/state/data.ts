@@ -72,9 +72,11 @@ export class Picture {
   world: WorldPayload | null = null;
   listeners = new Set<(what: 'air' | 'sea' | 'world') => void>();
   private airSince = 0;
-  private seaSince = 0;
   private clientId = Math.random().toString(36).slice(2, 10);
-  view = { lat: 30, lon: 10, r: 5000 };
+  view: { lat: number; lon: number; r: number; bbox?: [number, number, number, number] | null } = { lat: 30, lon: 10, r: 5000 };
+  /** MMSI of the selected ship, always sent even when out of view. */
+  seaSel = 0;
+  private seaTimer = 0;
   connected = false;
   lastAirOk = 0;
 
@@ -95,7 +97,13 @@ export class Picture {
       tick();
     };
     loop(() => this.pollAir(), () => 2000);
-    loop(() => this.pollSea(), () => 8000);
+    const seaLoop = async () => {
+      clearTimeout(this.seaTimer);
+      try { await this.pollSea(); } catch (e) { console.warn(e); }
+      this.seaTimer = window.setTimeout(seaLoop, document.hidden ? 30_000 : this.view.bbox ? 10_000 : 20_000);
+    };
+    this.refreshSea = () => { clearTimeout(this.seaTimer); this.seaTimer = window.setTimeout(seaLoop, 400); };
+    seaLoop();
     loop(() => this.pollWorld(), () => 30_000);
   }
 
@@ -160,8 +168,13 @@ export class Picture {
     applyEstimate(a);
   }
 
+  /** Ask for the ships in view again soon (after the map moves). */
+  refreshSea: () => void = () => {};
+
   private async pollSea() {
-    const res = await fetch(`/api/sea?since=${this.seaSince}`).catch(() => null);
+    const b = this.view.bbox;
+    const q = `${b ? `bbox=${b.map((v) => v.toFixed(2)).join(',')}&` : ''}sel=${this.seaSel}`;
+    const res = await fetch(`/api/sea?${q}`).catch(() => null);
     if (!res?.ok) return;
     const d = (await res.json()) as Delta<ShipRow>;
     const now = Date.now();
@@ -196,7 +209,6 @@ export class Picture {
       }
     }
     for (const m of d.removed) this.ships.delete(`s:${m}`);
-    this.seaSince = d.now;
     this.emit('sea');
   }
 

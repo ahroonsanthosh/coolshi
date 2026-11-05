@@ -40,6 +40,10 @@ const home = () => {
 };
 
 initKeys({ index: toggleIndex, home });
+app.on('selection', () => {
+  const s = app.selection;
+  picture.seaSel = s?.kind === 'sea' ? Number(s.id.slice(2)) : 0;
+});
 
 document.querySelector('.top')!.addEventListener('click', (e) => {
   const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;

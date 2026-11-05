@@ -340,7 +340,7 @@ function renderShip(s: Ship) {
       ${cell('Heading', '', '', '', 'hdg')}
       ${cell('Turning', '', '', '', 'rot')}
       ${cell('Draught', r[S.draught] ? `${r[S.draught]} m` : '—', 'as entered by the crew')}
-      ${cell('Flag', F.esc(flag || '—'), `MMSI ${r[S.mmsi]}`)}
+      ${cell('Flag', `${flagEmoji(r[S.flag])} ${F.esc(flag || '—')}`, `MMSI ${r[S.mmsi]}`)}
       ${cell('IMO', r[S.imo] ? String(r[S.imo]) : '—', r[S.callsign] ? `Call sign ${F.esc(r[S.callsign])}` : '')}
       ${cell('Size', r[S.len] ? `${r[S.len]} m` : '—', r[S.beam] ? `beam ${r[S.beam]} m` : '')}
       ${cell('Last report', '', '', 'wide', 'age')}
@@ -351,7 +351,7 @@ function renderShip(s: Ship) {
       ${r[S.imo] ? `<a class="btn" href="https://www.marinetraffic.com/en/ais/details/ships/imo:${r[S.imo]}" target="_blank" rel="noopener">MarineTraffic ↗</a>` : ''}
       <button class="btn" data-act="copy">Copy link</button>
     </div>
-    <div class="prov">Reported over AIS, heard by <b>${F.esc(srcNames(r[S.src]))}</b>. Moving ships are carried forward on their course for up to ten minutes between reports. Type, size, destination and draught are typed in by the crew and are often out of date.</div>
+    <div class="prov">Reported over AIS, heard by <b>${F.esc(srcNames(r[S.src]))}</b>${r[S.via] ? ` (relayed from ${F.esc(r[S.via])})` : ''}. Moving ships are carried forward on their course for up to ten minutes between reports. Type, size, destination and draught are typed in by the crew and are often out of date.</div>
   `);
   const upd = () => {
     const cur = app.selection && picture.ships.get(app.selection.id);

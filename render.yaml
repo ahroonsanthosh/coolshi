@@ -20,3 +20,5 @@ services:
         sync: false
       - key: AISSTREAM_API_KEY
         sync: false
+      - key: OPENWATERS_TOKEN
+        sync: false
