@@ -101,7 +101,9 @@ export function checkRoute(r: Route, lat: number, lon: number, trk: number | nul
     return { ok: false, reason: 'on the ground away from both airports on file' };
   }
   const { xt, at } = crossAlong(r.from.lat, r.from.lon, r.to.lat, r.to.lon, lat, lon);
-  const tol = Math.max(90_000, Math.min(400_000, total * 0.12));
+  // Long flights legitimately stray from the great circle to ride or dodge
+  // jet streams and weather, so the corridor widens with route length.
+  const tol = Math.max(100_000, Math.min(650_000, total * 0.15));
   if (Math.abs(xt) > tol || at < -60_000 || at > total + 60_000) {
     return { ok: false, reason: `${Math.round(Math.abs(xt) / 1000)} km off the line between the airports on file` };
   }

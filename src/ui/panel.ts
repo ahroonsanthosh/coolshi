@@ -167,7 +167,7 @@ function updateAircraft() {
   const ground = (r[A.flags] & AF.ground) !== 0;
   const alt = r[A.alt];
   setCell('alt', `<span style="color:${altColor(alt, ground)}">●</span> ${F.altitude(alt, ground)}`,
-    ground || alt === null ? '' : [alt >= 18000 ? `${F.n0(alt)} ft` : '', `${F.n0(alt * 0.3048)} m`, r[A.altGeom] !== null ? `GNSS ${F.n0(r[A.altGeom]!)} ft` : ''].filter(Boolean).join(' · '));
+    ground || alt === null ? '' : [`${F.n0(alt * 0.3048)} m`, r[A.altGeom] !== null ? `GNSS ${F.n0(r[A.altGeom]!)} ft` : ''].filter(Boolean).join(' · '));
   const vr = r[A.vr];
   if (ground || vr === null) setCell('vr', '—', '');
   else if (Math.abs(vr) < 200) setCell('vr', 'Level', `${vr > 0 ? '+' : ''}${F.n0(vr)} ft/min`);

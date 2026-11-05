@@ -9,6 +9,7 @@ import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { AirStore, SeaStore, type AircraftReport } from './store.ts';
+import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
 import { PROVIDERS, parseReadsb } from './feeds/readsb.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
@@ -26,6 +27,11 @@ const HOST = process.env.HOST || '0.0.0.0';
 const DIST = join(ROOT, 'dist');
 
 const air = new AirStore();
+const acdb = new AircraftDb(join(ROOT, '.cache'));
+acdb.load().then(() => {
+  air.identity = acdb;
+  console.log(`  Aircraft database: ${acdb.status}`);
+});
 const sea = new SeaStore();
 const opensky = new OpenSky();
 const digitraffic = new Digitraffic();
@@ -206,7 +212,7 @@ const server = http.createServer(async (req, res) => {
     m = p.match(/^\/api\/history\/sea\/(\d{6,9})$/);
     if (m) return sendJson(req, res, sea.history(Number(m[1])));
     if (p === '/healthz') {
-      return sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, watching: watching(), sources: sources() });
+      return sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(), sources: sources() });
     }
     // Static files (production build).
     if (!existsSync(DIST)) {

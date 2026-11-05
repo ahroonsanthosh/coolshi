@@ -2,7 +2,7 @@
 // search, alerts, about page and the opening title.
 
 import { A, AF, S } from '../../shared/protocol.ts';
-import { picture } from '../state/data.ts';
+import { picture, reportAge } from '../state/data.ts';
 import { app, type AcFilter, type LayerKey } from '../state/app.ts';
 import * as F from '../lib/format.ts';
 import { CLASS_LABEL, SQUAWK_MEANING, tidyDesc } from '../lib/aircraft.ts';
@@ -56,7 +56,7 @@ export function initCaption() {
     const n = picture.aircraft.size, m = picture.ships.size;
     if (!n && !m) return set('Listening…', 'gathering the world’s transponders', false);
     let airborne = 0;
-    for (const a of picture.aircraft.values()) if (!(a.row[A.flags] & AF.ground)) airborne++;
+    for (const a of picture.aircraft.values()) if (!(a.row[A.flags] & AF.ground) && reportAge(a) < a.staleAfter) airborne++;
     const q = picture.world?.quakes.filter((x) => Date.now() - x.time < 86_400_000).length ?? 0;
     set(`${F.n0(airborne)} aircraft aloft`, `${F.n0(m)} ships · ${q} earthquakes today`, false);
   };
@@ -357,7 +357,7 @@ export function openAbout() {
         <div>
           <h1>Watchfloor</h1>
           <p>A live picture of the planet’s traffic: every aircraft broadcasting ADS-B that a volunteer receiver can hear, ships reporting over AIS, earthquakes as they are recorded, disasters with an alert level, and the space station overhead.</p>
-          <p>Nothing here is simulated. Each track is placed where it last reported and carried forward along its great circle at its reported speed until the next report, never for more than 45 seconds for an aircraft. Fade means stale. Routes are only drawn when the aircraft is actually flying them, because route databases are often wrong.</p>
+          <p>Nothing here is simulated. Each track is placed where it last reported and carried forward along its great circle at its reported speed until the next report: for 45 seconds when a nearby receiver hears it every few seconds, a little longer than the polling interval when only the worldwide feed sees it. Fade means stale. Routes are only drawn when the aircraft is actually flying them, because route databases are often wrong.</p>
           <p>Coverage follows the volunteers. Europe and North America are dense; oceans, much of Africa and Central Asia are thin. Ships come from Finland’s open AIS network by default, so the Baltic is busy and the rest of the sea is quiet unless an AISStream key is set on the server.</p>
           <h4>Keys</h4>
           <div class="keys">
@@ -383,6 +383,7 @@ export function openAbout() {
           <div class="src"><span class="dot"></span><span class="nm">Planespotters.net, adsbdb</span><span class="age">on demand</span><span class="meta">aircraft photos, airframes and filed routes</span></div>
           <div class="src"><span class="dot"></span><span class="nm">Wikidata, Wikimedia Commons</span><span class="age">on demand</span><span class="meta">ship particulars and photos, matched by IMO number</span></div>
           <div class="src"><span class="dot"></span><span class="nm">OpenFreeMap, OpenStreetMap, Natural Earth</span><span class="age"></span><span class="meta">basemap and relief</span></div>
+          <div class="src"><span class="dot"></span><span class="nm">tar1090 aircraft database</span><span class="age">weekly</span><span class="meta">registration, type and operator for 620,000 airframes (Mictronics, wiedehopf)</span></div>
           <div class="src"><span class="dot"></span><span class="nm">OurAirports, ICAO, ITU</span><span class="age"></span><span class="meta">airports, address blocks by state, maritime identification digits</span></div>
           <h4>Units</h4>
           <p style="font-size:13px">Altitude is pressure altitude in feet (flight levels above 18,000 ft), speed is over the ground in knots, tracks and courses are degrees true, times are UTC.</p>

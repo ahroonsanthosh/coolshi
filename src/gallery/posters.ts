@@ -4,7 +4,7 @@
 import { A, AF, S } from '../../shared/protocol.ts';
 import { distance } from '../../shared/geo.ts';
 import { sunElevation, subsolarPoint } from '../../shared/sun.ts';
-import { picture, type Aircraft } from '../state/data.ts';
+import { picture, reportAge, type Aircraft } from '../state/data.ts';
 import { SQUAWK_MEANING, tidyDesc } from '../lib/aircraft.ts';
 import { airframe } from '../lib/enrich.ts';
 import { drawLand } from '../lib/land.ts';
@@ -93,7 +93,7 @@ const nowUtc = () => `${F.utc(Date.now())} UTC`;
 
 function airborne(): Aircraft[] {
   const out: Aircraft[] = [];
-  for (const a of picture.aircraft.values()) if (!(a.row[A.flags] & AF.ground) && Date.now() / 1000 - a.posT < 90) out.push(a);
+  for (const a of picture.aircraft.values()) if (!(a.row[A.flags] & AF.ground) && reportAge(a) < a.staleAfter) out.push(a);
   return out;
 }
 
@@ -174,7 +174,7 @@ export function buildPosters(): Poster[] {
           c.fillText(F.n0(bands[i]), PW - 64, y + h / 2 + 9);
           c.textAlign = 'left';
         }
-        footer(c, ['Aircraft heard by volunteer ADS-B receivers', 'and OpenSky in the last 90 seconds.'], CREAM);
+        footer(c, ['Airborne aircraft with a current position from', 'volunteer ADS-B receivers and OpenSky.'], CREAM);
       },
     });
   }

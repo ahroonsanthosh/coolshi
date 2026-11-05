@@ -1,0 +1,121 @@
+# Watchfloor
+
+A live picture of the planet's traffic, drawn like a printed chart on warm paper: every aircraft a volunteer receiver can hear, ships reporting over AIS, earthquakes as they happen, disasters with an alert level, and the space station overhead.
+
+![The globe at night over the Americas, aircraft coloured by altitude](docs/globe.jpg)
+
+Nothing is simulated, and nothing is guessed. Every number on screen comes from a named source, says how old it is, and is left out when it can't be checked.
+
+![A selected flight: photo, verified route with progress and ETA, telemetry](docs/flight.jpg)
+
+## What's in it
+
+**The map.** A MapLibre globe that turns flat as you zoom in, styled on OpenFreeMap tiles as a paper chart: washed-out shaded relief, quiet borders, grey type. Traffic is the only colour on the page.
+
+- **Aircraft**, drawn as top-down silhouettes by type (airliner, wide-body, business jet, light aircraft, helicopter, fast jet, glider, drone), pointing along their track and coloured by altitude from amber near the ground to deep blue above 40,000 ft.
+- **Ships**, teal when under way and pale when moored or at anchor.
+- **Earthquakes** (USGS) as rings sized by magnitude, fading with age; fresh ones pulse.
+- **Disasters** (GDACS): cyclones, floods, volcanoes, droughts and wildfires with orange or red alerts.
+- **The ISS** with its ground track 45 minutes back and ahead.
+- **Day and night**: the terminator plus civil, nautical and astronomical twilight, in 3° bands.
+- **Weather radar** (RainViewer), **airports** (3,300 with scheduled service) and **callsign labels**.
+
+**The details sheet.** Click anything. For an aircraft: a photo of the actual airframe with the photographer's credit, its type, operator and registration, the country of registration from its ICAO address, the route with a progress bar, distance flown and to go and an arrival estimate, altitude (pressure and GNSS), vertical rate, ground speed, track, squawk, how its position was obtained (ADS-B, MLAT or TIS-B), report age, and an altitude and speed profile of its flight so far. For a ship: type, flag, destination and ETA, size, draught, rate of turn, and a photo and particulars from Wikidata when it has an IMO entry. Airports show live arrivals, departures and whether it is day or night there; earthquakes show depth, felt reports, tsunami flag and PAGER alert.
+
+**The Index** (`I`). The picture right now, as posters: aircraft aloft by altitude band, the highest and fastest aircraft, emergency squawks, the strongest earthquake of the week, the past day's quakes on a world map, where the sun is rising and setting, the ISS, ships under way, the busiest approach, military traffic, disaster alerts. They hang on cloth in WebGL, ripple, and bend as you scroll or drag through them. Click one to fly there.
+
+![The Index: live data printed as posters on cloth](docs/index.jpg)
+
+**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination; airports by code, name or city; earthquakes by place.
+
+**Alerts** appear when an aircraft squawks 7500, 7600 or 7700 (once a second report confirms it) or a magnitude 5.5+ earthquake strikes.
+
+## Accuracy
+
+This is where most of the work went.
+
+- **Tracks never jump backwards.** The aggregator merges every feed by ICAO address or MMSI and only moves a track when a report's position time is newer than the one it holds, so a slow worldwide poll can't drag a plane back to where it was a minute ago.
+- **Dead reckoning along great circles**, at reported ground speed and track, for as long as the feed's report interval justifies: 45 s for a local receiver feed that reports every few seconds, a little more than the polling interval for the worldwide feed. When the next report lands, the gap is closed over a second instead of snapping. Tracks fade once overdue and the details sheet says how far ahead of its last report a symbol is drawn.
+- **Routes are verified before they are shown.** Route databases map a callsign to the route it usually flies and are often wrong. The aircraft has to be inside a corridor around the great circle between the two airports (widening with route length, since long flights ride or dodge jet streams) and not heading away from the destination. If it isn't, the sheet says which route was on file and why it was rejected.
+- **Real types for every aircraft.** OpenSky doesn't send aircraft types, so the server loads the tar1090 airframe database (620,000 entries: registration, type, model, operator, military flag) and fills them in.
+- **Headlines are checked.** The Index only names the highest or fastest aircraft when its type is known and its numbers are plausible (barometric and GNSS altitude agree, no multilaterated speed).
+- **Bad data is filtered**: ground vehicles and tower beacons, positions older than a minute, garbled jumps faster than Mach 3, AIS "not available" values (speed 102.3, course 360, heading 511, rate of turn −128).
+- **Solar position** uses the NOAA algorithm and agrees with an independent implementation to 0.01°. The ISS's sunlight takes its altitude into account (it sees the sun about 20° past the ground terminator).
+- **Coverage is stated honestly.** Volunteer receivers cover Europe and North America densely and oceans, much of Africa and Central Asia thinly. The About page lists every source with its live status.
+
+`npm test` covers the geodesy, solar position, feed parsing, merging, emergency confirmation and route verification.
+
+## Running it
+
+Requires Node.js 22.18 or newer (the server is TypeScript run directly by Node).
+
+```bash
+npm install
+```
+
+```bash
+npm run dev
+```
+
+Open http://localhost:5173. The aggregator runs on port 8080 and Vite proxies `/api` to it.
+
+For production, one process on one port:
+
+```bash
+npm run build
+```
+
+```bash
+npm start
+```
+
+Then open http://localhost:8080. On first start the server downloads the aircraft database (8 MB) into `.cache/` and refreshes it weekly.
+
+### Configuration
+
+Everything is optional; copy `.env.example` to `.env`.
+
+| Setting | What it does |
+| --- | --- |
+| `OPENSKY_CLIENT_ID`, `OPENSKY_CLIENT_SECRET` | A free OpenSky account raises the daily allowance from 400 to 4,000 credits. A worldwide poll costs 4, so anonymous access gives about four hours of world view a day at the default 150 s interval; an account keeps it live most of the day at 45 s. Polling only runs while someone is watching. |
+| `OPENSKY_POLL_S` | Seconds between worldwide polls. |
+| `AISSTREAM_API_KEY` | Worldwide ships from AISStream (free key at aisstream.io). Without it, ships come from Fintraffic's open feed for the Baltic. |
+| `PORT` | Port for the aggregator and the built site (default 8080). |
+
+When OpenSky is out of credits or down, the server automatically sweeps the 45 busiest airspaces through adsb.fi and adsb.lol instead, and the status line says `Live · regional`.
+
+## How it works
+
+```
+OpenSky (world, every 150 s) ─┐
+adsb.fi / adsb.lol (your view │
+  every 5 s, military,        ├─► server/store.ts ─► /api/air  (deltas) ─┐
+  emergency squawks) ─────────┤    merge by address,  /api/sea           ├─► browser: dead reckoning,
+Fintraffic AIS, AISStream ────┤    newest position    /api/world         │   MapLibre globe, panels,
+USGS, GDACS, ISS ─────────────┘    wins, history      /api/history/...  ─┘   three.js Index
+tar1090 aircraft database ────────► types, registrations
+```
+
+- `server/` the aggregator: feeds, the merged store, HTTP. Each browser reports what it is looking at, and the ADS-B networks are asked about those areas, paced to their published limits (adsb.fi one request a second; adsb.lol more gently).
+- `shared/` geodesy, solar position and the wire format, used by both sides.
+- `src/` the client: `map/` (style, icons, layers, render loop), `ui/` (sheet, search, layers, about), `gallery/` (posters and the cloth renderer), `lib/` (aircraft and AIS tables, enrichment, formatting).
+
+Photos (Planespotters), airframes and routes (adsbdb), ship particulars (Wikidata) and radar (RainViewer) are fetched by the browser on demand.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `/`, Ctrl K | Search |
+| `I` | Index |
+| `L` | Layers and filters |
+| `F` | Follow the selected track |
+| `G` | Back to the whole globe |
+| `R` / `N` / `A` / `E` / `T` | Radar / day and night / airports / earthquakes / trail |
+| `Esc` | Close, or clear the selection |
+
+Links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) open with that track selected.
+
+## Data and credits
+
+OpenSky Network; adsb.fi; adsb.lol; Fintraffic Digitraffic (CC BY 4.0); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.

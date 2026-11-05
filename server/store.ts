@@ -47,8 +47,14 @@ const EMERGENCY_SQUAWKS = new Set(['7500', '7600', '7700']);
 const HIST_MAX_AGE_S = 12 * 3600;
 const HIST_MAX_POINTS = 2400;
 
+export interface IdentityLookup {
+  get(hex: string): { reg: string; type: string; desc: string; owner: string; mil: boolean; pia: boolean; ladd: boolean } | null;
+}
+
 export class AirStore {
   private map = new Map<string, Aircraft>();
+  /** Airframe database, consulted once per new aircraft. */
+  identity: IdentityLookup | null = null;
   private tomb = new Map<string, number>();
   private bootedAt = Date.now();
 
@@ -68,6 +74,14 @@ export class AirStore {
       };
       this.map.set(r.hex, a);
       this.tomb.delete(r.hex);
+      const id = this.identity?.get(r.hex);
+      if (id) {
+        a.row[10] = id.type;
+        a.row[11] = id.reg;
+        a.row[16] = id.desc;
+        a.row[17] = id.owner;
+        a.row[14] |= (id.mil ? AF.mil : 0) | (id.pia ? AF.pia : 0) | (id.ladd ? AF.ladd : 0);
+      }
     }
     const row = a.row;
     const newer = r.posT > row[3] + 0.05;

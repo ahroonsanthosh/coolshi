@@ -24,6 +24,7 @@ const fc = (features: GeoJSON.Feature[] = []): FC => ({ type: 'FeatureCollection
 export const AIRPORTS = airportsRaw as [string, string, string, string, string, number, number, number | null, number][];
 
 let map: MlMap;
+const NIGHT_BANDS = [0, 3, 6, 9, 12, 15, 18];
 const sources: Record<string, GeoJSONSource> = {};
 
 export function getMap() { return map; }
@@ -66,8 +67,9 @@ function addSource(id: string, data: FC = fc()) {
 function setup() {
   addIcons(map);
 
-  // Night: four nested twilight bands, so dusk has depth instead of a line.
-  for (const d of [0, 6, 12, 18]) {
+  // Night: nested bands every 3° of sun depression down to astronomical
+  // twilight (18°), so dusk has depth instead of a line.
+  for (const d of NIGHT_BANDS) {
     addSource(`night${d}`);
     map.addLayer({
       id: `night${d}`, type: 'fill', source: `night${d}`,
@@ -75,7 +77,7 @@ function setup() {
       // city scale, where they'd only grey the chart.
       paint: {
         'fill-color': '#3b3128',
-        'fill-opacity': ['interpolate', ['linear'], ['zoom'], 3, d === 0 ? 0.045 : 0.035, 7, d === 0 ? 0.015 : 0.008],
+        'fill-opacity': ['interpolate', ['linear'], ['zoom'], 3, d === 0 ? 0.04 : 0.018, 7, d === 0 ? 0.014 : 0.004],
         'fill-antialias': false,
       },
     });
@@ -339,7 +341,7 @@ const LAYER_GROUPS: Record<string, string[]> = {
   quakes: ['quakes', 'quake-fill', 'quake-labels'],
   disasters: ['disasters'],
   iss: ['iss', 'iss-track'],
-  night: ['night0', 'night6', 'night12', 'night18'],
+  night: NIGHT_BANDS.map((d) => `night${d}`),
   trails: ['trail'],
 };
 
@@ -357,7 +359,7 @@ function applyLayerVisibility() {
 
 function updateNight() {
   const now = Date.now();
-  for (const d of [0, 6, 12, 18]) {
+  for (const d of NIGHT_BANDS) {
     sources[`night${d}`]?.setData(fc([{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [nightPolygon(now, d)] } }]));
   }
 }
