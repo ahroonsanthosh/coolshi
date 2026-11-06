@@ -31,6 +31,8 @@ export interface AircraftReport {
   ladd?: boolean;
   pia?: boolean;
   emergency?: string; // ADS-B emergency/priority status
+  /** Position is only the rough area of the receivers hearing it. */
+  approx?: boolean;
   /** Extra fields the aircraft broadcasts (air data, autopilot, wind). */
   ext?: Record<string, unknown>;
   src: number;
@@ -92,7 +94,9 @@ export class AirStore {
       const e = a.ext;
       if (!e || typeof e.ws !== 'number' || typeof e.wd !== 'number') continue;
       if (now / 1000 - (a.extT ?? 0) > 600 || (a.row[4] ?? 0) < 5000) continue;
-      out.push([+a.row[1].toFixed(3), +a.row[2].toFixed(3), a.row[4] ?? 0, e.ws, e.wd, typeof e.oat === 'number' ? e.oat : null]);
+      if (a.row[14] & AF.approx) continue; // no real position to pin a wind to
+      const oat = typeof e.oat === 'number' && e.oat >= -80 && e.oat <= 50 ? e.oat : null;
+      out.push([+a.row[1].toFixed(3), +a.row[2].toFixed(3), a.row[4] ?? 0, e.ws, e.wd, oat]);
     }
     return out;
   }
@@ -135,6 +139,16 @@ export class AirStore {
     if (r.mil) flags |= AF.mil;
     if (r.ladd) flags |= AF.ladd;
     if (r.pia) flags |= AF.pia;
+    // A rough area never replaces a real position heard in the last five
+    // minutes; a real position always replaces a rough one.
+    if (r.approx && !(row[14] & AF.approx) && row[3] > 0 && r.posT - row[3] < 300 && !(row[14] & AF.est) && row[1] !== r.lat) {
+      if (typeof r.alt === 'number') row[4] = r.alt;
+      if (r.sq) row[12] = r.sq;
+      row[14] = flags | (row[14] & (AF.ground | AF.mlat | AF.tisb));
+      a.upd = now;
+      return;
+    }
+    if (newer || row[3] === r.posT) flags = r.approx ? flags | AF.approx : flags & ~AF.approx;
     if (newer && (row[14] & AF.est)) {
       // Back in range: a real report replaces the estimate.
       flags &= ~AF.est;
@@ -167,7 +181,7 @@ export class AirStore {
         flags &= ~AF.emergency;
         row[18] = 0;
       }
-      if (moved) this.addHistory(a, r);
+      if (moved && !r.approx) this.addHistory(a, r);
       if (r.ext) { a.ext = r.ext; a.extT = r.posT; }
     } else {
       flags |= row[14] & (AF.ground | AF.mlat | AF.tisb);

@@ -7,7 +7,7 @@ export const A = {
   sq: 12, cat: 13, flags: 14, src: 15, desc: 16, owner: 17, emSince: 18, cad: 19, estLat: 20, estLon: 21, estEta: 22,
 } as const;
 /** Bit flags in A.flags */
-export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64, est: 128 } as const;
+export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64, est: 128, approx: 256 } as const;
 /** Source bit flags */
 export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64, adsbone: 128, openwaters: 256 } as const;
 export const SRC_NAMES: Record<number, string> = {

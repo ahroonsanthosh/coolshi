@@ -55,3 +55,23 @@ test('store: an emergency squawk needs two reports, a declared emergency one', (
   s.ingest({ hex: 'ccc333', lat: 50, lon: 0, posT: 1000, emergency: 'general', src: 2, cadence: 6 }, 2_000_000);
   assert.ok(s.get('ccc333')![14] & AF.emergency);
 });
+
+test('readsb: military Mode S without a position becomes an approximate report; civil ones are dropped', () => {
+  const out = parseReadsb({ now: 1_793_840_000, aircraft: [
+    { hex: '43c966', type: 'mode_s', flight: 'JAVLN26 ', t: 'HAWK', dbFlags: 1, alt_baro: 750, rr_lat: 54.7, rr_lon: -0.8, seen: 0.2 },
+    { hex: '400001', type: 'mode_s', t: 'A320', alt_baro: 35000, rr_lat: 51, rr_lon: 0, seen: 0.5 },
+  ] }, 2, 30);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].approx, true);
+  assert.equal(out[0].lat, 54.7);
+});
+
+test('store: a rough area never overwrites a fresh real position', () => {
+  const s = new AirStore();
+  s.ingest({ hex: 'ddd444', lat: 54.1, lon: -1.47, posT: 1000, alt: 800, src: 2, cadence: 6 }, 1_100_000);
+  s.ingest({ hex: 'ddd444', lat: 54.7, lon: -0.8, posT: 1010, alt: 750, approx: true, src: 2, cadence: 30 }, 1_100_000);
+  const r = s.get('ddd444')!;
+  assert.equal(r[1], 54.1);
+  assert.equal(r[4], 750);
+  assert.equal(r[14] & AF.approx, 0);
+});

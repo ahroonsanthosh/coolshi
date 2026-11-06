@@ -39,8 +39,17 @@ export function parseReadsb(json: any, src: number, cadence: number): AircraftRe
   let now: number = json.now ?? Date.now() / 1000;
   if (now > 1e11) now /= 1000; // adsb.lol sends ms, adsb.fi seconds
   const out: AircraftReport[] = [];
-  for (const a of list) {
-    if (a.lat === undefined || a.lon === undefined || a.seen_pos === undefined) continue;
+  for (const a of list as (ReadsbAc & { rr_lat?: number; rr_lon?: number; seen?: number })[]) {
+    // Military aircraft often answer radar with Mode S but broadcast no
+    // position. The network then knows only roughly where they are (near the
+    // receivers that hear them): keep those as approximate, airborne only.
+    let approx = false;
+    if (a.lat === undefined || a.lon === undefined || a.seen_pos === undefined) {
+      const mil = ((a.dbFlags ?? 0) & 1) === 1;
+      if (!mil || a.rr_lat === undefined || a.rr_lon === undefined || typeof a.alt_baro !== 'number' || (a.seen ?? 99) > 60) continue;
+      a.lat = a.rr_lat; a.lon = a.rr_lon; a.seen_pos = a.seen ?? 0;
+      approx = true;
+    }
     if (a.seen_pos > 60) continue; // too old to trust as "now"
     const hex = a.hex.toLowerCase();
     // Ground vehicles and fixed transmitters (tower beacons, ADS-B
@@ -75,6 +84,7 @@ export function parseReadsb(json: any, src: number, cadence: number): AircraftRe
       ladd: (flags & 8) === 8,
       emergency: a.emergency,
       ext: extras(a as any),
+      approx,
       src,
       cadence,
     });

@@ -63,7 +63,9 @@ const watching = () => [...views.values()].some((v) => Date.now() - v.seen < 60_
 // adsb.fi / adsb.lol: two lanes, each paced to what its network allows.
 
 type P = (typeof PROVIDERS)[Provider];
-type Job = { key: string; url: (p: P) => string; cadence: number; due: number; needsType?: boolean };
+/** pri 0 runs before pri 1 whenever both are due: what people are looking
+ *  at, military and emergencies first, the worldwide sweeps after. */
+type Job = { key: string; url: (p: P) => string; cadence: number; due: number; needsType?: boolean; pri?: number };
 
 // Worldwide by aircraft type: one request returns every aircraft of that type
 // a network can hear, anywhere, so the most common sixty types cover most
@@ -72,7 +74,11 @@ type Job = { key: string; url: (p: P) => string; cadence: number; due: number; n
 // patrol, surveillance and command aircraft, and helicopters, many of which
 // fly without a callsign a database would recognise.
 const MIL_TYPES = ['C17', 'K35R', 'K35E', 'KC46', 'C30J', 'C130', 'A400', 'C5M', 'P8', 'P3', 'E3TF', 'E3CF', 'E6', 'R135', 'E8', 'C2', 'KC10',
-  'MRTT', 'A310', 'C295', 'CN35', 'C27J', 'H60', 'H47', 'V22', 'UH1', 'EC45', 'NH90', 'U2', 'Q4', 'B52', 'C40', 'C32', 'E2', 'P1', 'Y20', 'IL76'];
+  'MRTT', 'A310', 'C295', 'CN35', 'C27J', 'H60', 'H47', 'V22', 'UH1', 'EC45', 'NH90', 'U2', 'Q4', 'B52', 'C40', 'C32', 'E2', 'P1', 'Y20', 'IL76',
+  // Fast jets, bombers and jet trainers: rarely broadcast, but when one does
+  // (ferry flights, airshows, transits with a tanker) these find it.
+  'F16', 'F15', 'F18', 'F18S', 'F35', 'F22', 'F5', 'B1', 'B2', 'EUFI', 'RFAL', 'TOR', 'JAS39', 'HAWK', 'M346', 'T38', 'T45', 'TEX2',
+  'A10', 'AJET', 'L39', 'FA50', 'T50', 'PC21', 'K8', 'E7WT', 'E737', 'R135', 'C135', 'KC2'];
 const SEED_TYPES = ['B738', 'A320', 'A20N', 'A21N', 'A321', 'B38M', 'B739', 'A319', 'B789', 'B77W', 'A359', 'B763', 'B788', 'A333', 'E75L', 'CRJ9', 'B737', 'B752', 'DH8D', 'AT76', 'E190', 'A332', 'B772', 'B744', 'B748', 'A388', 'CRJ7', 'E195', 'BCS3', 'B39M'];
 let topTypes = [...SEED_TYPES, ...MIL_TYPES];
 setInterval(() => {
@@ -108,13 +114,13 @@ function nextJob(lane: Provider, now: number): Job | null {
   }
   for (const p of pts.slice(0, 14)) {
     const key = `pt:${p.lat.toFixed(1)},${p.lon.toFixed(1)}`;
-    jobs.push({ key, url: (P) => P.point(p.lat, p.lon, p.r), cadence: 6, due: (lastRun.get(key) ?? 0) + 5000 });
+    jobs.push({ key, url: (P) => P.point(p.lat, p.lon, p.r), cadence: 6, due: (lastRun.get(key) ?? 0) + 5000, pri: 0 });
   }
   // 2. Military aircraft and emergency squawks, worldwide.
   // Each network hears different military traffic: ask every one of them.
-  jobs.push({ key: `mil:${lane}`, url: (P) => P.mil, cadence: 30, due: (lastRun.get(`mil:${lane}`) ?? 0) + 20_000 });
+  jobs.push({ key: `mil:${lane}`, url: (P) => P.mil, cadence: 30, due: (lastRun.get(`mil:${lane}`) ?? 0) + 20_000, pri: 0 });
   for (const s of ['7700', '7600', '7500']) {
-    jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000 });
+    jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000, pri: 0 });
   }
   // 3. Worldwide by type, on the networks that offer it.
   if (PROVIDERS[lane].type) {
@@ -131,7 +137,7 @@ function nextJob(lane: Provider, now: number): Job | null {
     const busy = p.weight >= 5;
     jobs.push({ key, url: (P) => P.point(p.lat, p.lon, 250), cadence: busy ? fast / 800 : 330, due: (lastRun.get(key) ?? 0) + (busy ? fast : 300_000) });
   }
-  const ready = jobs.filter((j) => j.due <= now).sort((a, b) => a.due - b.due);
+  const ready = jobs.filter((j) => j.due <= now).sort((a, b) => (a.pri ?? 1) - (b.pri ?? 1) || a.due - b.due);
   void lane;
   return ready[0] ?? null;
 }

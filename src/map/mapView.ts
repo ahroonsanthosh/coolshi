@@ -278,8 +278,21 @@ function setup() {
 
   // Aircraft.
   addSource('aircraft');
+  // Heard but not located: a ring where the receivers that hear it are,
+  // never a precise plane icon.
   map.addLayer({
-    id: 'aircraft', type: 'symbol', source: 'aircraft',
+    id: 'approx', type: 'circle', source: 'aircraft', filter: ['get', 'approx'],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 5, 6, 11, 9, 18],
+      'circle-color': ['case', ['get', 'sel'], 'rgba(42,39,36,0.12)', 'rgba(0,0,0,0)'],
+      'circle-stroke-width': 1.4,
+      'circle-stroke-color': ['case', ['get', 'sel'], INK, altColorExpr()],
+      'circle-stroke-opacity': 0.75,
+      'circle-pitch-alignment': 'map',
+    },
+  });
+  map.addLayer({
+    id: 'aircraft', type: 'symbol', source: 'aircraft', filter: ['!', ['get', 'approx']],
     layout: {
       'icon-image': ['get', 'icon'],
       'icon-size': [
@@ -374,7 +387,7 @@ function airportFeatures(): FC {
 // Visibility
 
 const LAYER_GROUPS: Record<string, string[]> = {
-  aircraft: ['aircraft'],
+  aircraft: ['aircraft', 'approx'],
   ships: ['ships', 'ship-dots'],
   labels: ['labels'],
   airports: ['airports', 'airport-labels'],
@@ -591,15 +604,15 @@ function drawTracks(z: number) {
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [a.x, a.y] },
         properties: {
-          id: a.id, icon: a.cls, size: ICON_SIZE[a.cls], rot, alt, em, stale, est,
+          id: a.id, icon: a.cls, size: ICON_SIZE[a.cls], rot, alt, em, stale, est, approx: (r[A.flags] & AF.approx) !== 0,
           sel: a.id === selId, sort: a.id === selId ? 1e6 : em ? 1e5 : alt,
         },
       });
-      if (wantLabels && (z >= 7 || a.id === selId || em)) {
+      if (wantLabels && (z >= 7 || a.id === selId || em || (z >= 5 && (r[A.flags] & AF.approx)))) {
         const name = r[A.cs] || r[A.reg] || r[A.hex].toUpperCase();
         labels.push({
           type: 'Feature', geometry: { type: 'Point', coordinates: [a.x, a.y] },
-          properties: { name, sub: a.est ? 'estimated' : [altitude(r[A.alt], ground), r[A.type]].filter(Boolean).join('  '), sort: a.id === selId ? -1 : -alt },
+          properties: { name, sub: (r[A.flags] & AF.approx) ? `approx. · ${altitude(r[A.alt], ground)}` : a.est ? 'estimated' : [altitude(r[A.alt], ground), r[A.type]].filter(Boolean).join('  '), sort: a.id === selId ? -1 : -alt },
         });
       }
     }
@@ -815,12 +828,12 @@ function updateIss() {
 // ---------------------------------------------------------------------------
 // Pointer
 
-const PICKABLE = ['aircraft', 'ships', 'ship-dots', 'quakes', 'disasters', 'airports', 'iss'];
+const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'airports', 'iss'];
 
 function toSelection(f: MapGeoJSONFeature): Selection | null {
   const id = f.properties?.id as string;
   switch (f.layer.id) {
-    case 'aircraft': return { kind: 'air', id };
+    case 'aircraft': case 'approx': return { kind: 'air', id };
     case 'ships': case 'ship-dots': return { kind: 'sea', id };
     case 'quakes': return { kind: 'quake', id };
     case 'disasters': return { kind: 'disaster', id };
@@ -836,7 +849,7 @@ function pick(point: maplibregl.Point): Selection | null {
   const feats = map.queryRenderedFeatures(box, { layers });
   if (!feats.length) return null;
   // Nearest wins, with tracks preferred over the background events.
-  const rank = (l: string) => (l === 'aircraft' || l === 'ships' || l === 'ship-dots' || l === 'iss' ? 0 : l === 'airports' ? 2 : 1);
+  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' ? 0 : l === 'airports' ? 2 : 1);
   feats.sort((a, b) => rank(a.layer.id) - rank(b.layer.id));
   return toSelection(feats[0]);
 }

@@ -120,6 +120,7 @@ function renderAircraft(a: Aircraft) {
     em ? `<span class="chip red">Squawk ${r[A.sq]} · ${SQUAWK_MEANING[r[A.sq]] ?? 'Emergency'}</span>` : '',
     mil ? '<span class="chip blue">Military</span>' : '',
     a.est ? '<span class="chip amber">Estimated position · out of range</span>' : '',
+    r[A.flags] & AF.approx ? '<span class="chip amber">Approximate position · Mode S only</span>' : '',
     r[A.flags] & AF.ladd ? '<span class="chip">Blocked from public lists (LADD)</span>' : '',
     r[A.flags] & AF.pia ? '<span class="chip">Privacy address (PIA)</span>' : '',
   ].join('');
@@ -181,14 +182,19 @@ function updateAircraft() {
   const gs = r[A.gs];
   setCell('gs', F.speed(gs), gs === null ? '' : `${F.n0(gs * 1.852)} km/h`);
   setCell('trk', F.heading(r[A.trk]), F.compass(r[A.trk]) ? `towards ${F.compass(r[A.trk])}` : '');
-  const how = r[A.flags] & AF.mlat ? 'MLAT' : r[A.flags] & AF.tisb ? 'TIS-B' : 'ADS-B';
-  setCell('src', how, how === 'MLAT' ? 'timed by receivers' : how === 'TIS-B' ? 'relayed from radar' : 'from its own GNSS');
+  const how = r[A.flags] & AF.approx ? 'Mode S' : r[A.flags] & AF.mlat ? 'MLAT' : r[A.flags] & AF.tisb ? 'TIS-B' : 'ADS-B';
+  setCell('src', how, how === 'Mode S' ? 'no position broadcast' : how === 'MLAT' ? 'timed by receivers' : how === 'TIS-B' ? 'relayed from radar' : 'from its own GNSS');
   const age = reportAge(a);
-  const est = a.est ? 'estimated: out of receiver range, carried along its filed route'
+  const est = (r[A.flags] & AF.approx) ? 'rough area only: heard by receivers near here, no position broadcast'
+    : a.est ? 'estimated: out of receiver range, carried along its filed route'
     : age > 3 ? `drawn ${F.n0(Math.min(age, a.maxDr))} s ahead on its track` : 'drawn as reported';
   setCell('age', `${F.ago(age)}`, `${est} · ${F.latLon(a.y, a.x)}`);
   const prov = el.querySelector('#prov');
   if (prov) {
+    if (r[A.flags] & AF.approx) {
+      prov.innerHTML = `<b>Approximate position.</b> This aircraft answers radar with a Mode S transponder (identity, altitude and squawk) but is not broadcasting where it is, as many military aircraft don't. ${F.esc(srcNames(r[A.src]))} place it only near the receivers that hear it, so the ring can be off by a hundred kilometres or more. It moves when receivers elsewhere pick it up.`;
+      return;
+    }
     if (a.est) {
       const dest = AIRPORTS.find((p) => Math.abs(p[5] - a.est![0]) < 0.01 && Math.abs(p[6] - a.est![1]) < 0.01);
       const eta = r[A.estEta] ? F.utc(r[A.estEta] * 1000) : '';
@@ -247,7 +253,9 @@ async function loadDeck(a: Aircraft) {
     }
     cells.push(cell('Wind outside', `${F.heading(e.wd)} at ${F.n0(e.ws)} kt`, comp));
   }
-  if (typeof e.oat === 'number') {
+  // Temperatures from older Mode S replies are sometimes garbage (−116 °C);
+  // show only what the atmosphere can actually be at that height.
+  if (typeof e.oat === 'number' && e.oat >= -80 && e.oat <= 50 && Math.abs(e.oat - isaTemp(alt)) <= 30) {
     const isa = isaTemp(alt);
     const dev = e.oat - isa;
     cells.push(cell('Outside air', `${e.oat} °C`, `ISA ${dev >= 0 ? '+' : '−'}${Math.abs(Math.round(dev))} °C${typeof e.tat === 'number' ? ` · total ${e.tat} °C` : ''}`));

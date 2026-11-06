@@ -48,7 +48,9 @@ export function initCaption() {
     }
   };
   const update = () => {
-    const target = app.hover ?? app.selection;
+    // A hovered aircraft the filters have since hidden doesn't count.
+    const hov = app.hover?.kind === 'air' && (() => { const a = picture.aircraft.get(app.hover!.id); return !a || acHidden(a); })() ? null : app.hover;
+    const target = hov ?? app.selection;
     if (target) {
       const d = describe(target.kind, target.id);
       if (d) return set(d[0], d[1], true);
@@ -77,6 +79,7 @@ export function describe(kind: string, id: string): [string, string] | null {
     const ground = (r[A.flags] & AF.ground) !== 0;
     const what = r[A.desc] ? tidyDesc(r[A.desc]) : r[A.type] || CLASS_LABEL[a.cls];
     const em = r[A.flags] & AF.emergency ? ` · squawk ${r[A.sq]}` : '';
+    if (r[A.flags] & AF.approx) return [r[A.cs] || r[A.reg] || r[A.hex].toUpperCase(), `${what} · ${F.altitude(r[A.alt])} · rough position only (Mode S, no position broadcast)`];
     if (a.est) return [r[A.cs] || r[A.reg] || r[A.hex].toUpperCase(), `${what} · estimated position, out of receiver range ${F.ago(reportAge(a)).replace(' ago', '')}`];
     return [r[A.cs] || r[A.reg] || r[A.hex].toUpperCase(), `${what} · ${F.altitude(r[A.alt], ground)}${ground ? '' : ' · ' + F.speed(r[A.gs])}${em}`];
   }
