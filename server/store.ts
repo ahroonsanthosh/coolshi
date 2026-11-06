@@ -3,6 +3,7 @@
 // if its position is newer than the one we hold, so a slow feed can never
 // drag a track back to where it was a minute ago.
 
+import { readFileSync } from 'node:fs';
 import { AF, type AircraftRow, type HistoryPoint, type ShipRow, type Delta } from '../shared/protocol.ts';
 import { distance } from '../shared/geo.ts';
 
@@ -55,6 +56,20 @@ export interface IdentityLookup {
   get(hex: string): { reg: string; type: string; desc: string; owner: string; mil: boolean; pia: boolean; ladd: boolean } | null;
 }
 
+// ICAO address blocks states reserve for military aircraft, from the
+// tar1090 database (wiedehopf); catches aircraft no database has flagged.
+const MIL_RANGES: [number, number][] = (JSON.parse(readFileSync(new URL('../src/data/milranges.json', import.meta.url), 'utf8')) as [string, string][])
+  .map(([a, b]) => [parseInt(a, 16), parseInt(b, 16)]);
+export function inMilitaryBlock(hex: string): boolean {
+  if (hex.length !== 6) return false;
+  const n = parseInt(hex, 16);
+  return MIL_RANGES.some(([a, b]) => n >= a && n <= b);
+}
+
+// Types only air forces fly (no civil variant shares the designator).
+const MIL_ONLY_TYPES = new Set(['C17', 'K35R', 'K35E', 'KC46', 'A400', 'C5M', 'P8', 'P3', 'E3TF', 'E3CF', 'E6', 'R135', 'E8', 'C2', 'KC10',
+  'V22', 'U2', 'Q4', 'B52', 'B1', 'B2', 'E2', 'P1', 'Y20', 'H47', 'H60', 'NH90', 'EUFI', 'F16', 'F15', 'F18', 'F35', 'F22', 'RFAL', 'TOR', 'HAWK', 'T38', 'A10']);
+
 export class AirStore {
   private map = new Map<string, Aircraft>();
   /** Airframe database, consulted once per new aircraft. */
@@ -93,7 +108,9 @@ export class AirStore {
       };
       this.map.set(r.hex, a);
       this.tomb.delete(r.hex);
+      if (inMilitaryBlock(r.hex)) a.row[14] |= AF.mil;
       const id = this.identity?.get(r.hex);
+      if (id && MIL_ONLY_TYPES.has(id.type)) a.row[14] |= AF.mil;
       if (id) {
         a.row[10] = id.type;
         a.row[11] = id.reg;
@@ -108,6 +125,7 @@ export class AirStore {
     // adsb.lol know the type and registration, OpenSky doesn't send them.
     if (r.cs) row[9] = r.cs;
     if (r.type) row[10] = r.type;
+    if (MIL_ONLY_TYPES.has(row[10])) row[14] |= AF.mil;
     if (r.reg) row[11] = r.reg;
     if (r.cat) row[13] = r.cat;
     if (r.desc) row[16] = r.desc;

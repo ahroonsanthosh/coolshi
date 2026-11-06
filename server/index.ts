@@ -68,13 +68,18 @@ type Job = { key: string; url: (p: P) => string; cadence: number; due: number; n
 // Worldwide by aircraft type: one request returns every aircraft of that type
 // a network can hear, anywhere, so the most common sixty types cover most
 // airline traffic in a fraction of the requests a circle sweep needs.
+// Military types worth asking for by name, worldwide: tankers, transports,
+// patrol, surveillance and command aircraft, and helicopters, many of which
+// fly without a callsign a database would recognise.
+const MIL_TYPES = ['C17', 'K35R', 'K35E', 'KC46', 'C30J', 'C130', 'A400', 'C5M', 'P8', 'P3', 'E3TF', 'E3CF', 'E6', 'R135', 'E8', 'C2', 'KC10',
+  'MRTT', 'A310', 'C295', 'CN35', 'C27J', 'H60', 'H47', 'V22', 'UH1', 'EC45', 'NH90', 'U2', 'Q4', 'B52', 'C40', 'C32', 'E2', 'P1', 'Y20', 'IL76'];
 const SEED_TYPES = ['B738', 'A320', 'A20N', 'A21N', 'A321', 'B38M', 'B739', 'A319', 'B789', 'B77W', 'A359', 'B763', 'B788', 'A333', 'E75L', 'CRJ9', 'B737', 'B752', 'DH8D', 'AT76', 'E190', 'A332', 'B772', 'B744', 'B748', 'A388', 'CRJ7', 'E195', 'BCS3', 'B39M'];
-let topTypes = SEED_TYPES;
+let topTypes = [...SEED_TYPES, ...MIL_TYPES];
 setInterval(() => {
   const n = new Map<string, number>();
   for (const r of air.values()) if (r[10] && !(r[14] & 1)) n.set(r[10], (n.get(r[10]) ?? 0) + 1);
   const ranked = [...n.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t).filter((t) => /^[A-Z0-9]{2,4}$/.test(t));
-  topTypes = [...new Set([...ranked.slice(0, 140), ...SEED_TYPES])].slice(0, 150);
+  topTypes = [...new Set([...ranked.slice(0, 140), ...SEED_TYPES])].slice(0, 150).concat(MIL_TYPES.filter((t) => !ranked.slice(0, 140).includes(t)));
 }, 300_000);
 const lastRun = new Map<string, number>();
 
@@ -106,7 +111,8 @@ function nextJob(lane: Provider, now: number): Job | null {
     jobs.push({ key, url: (P) => P.point(p.lat, p.lon, p.r), cadence: 6, due: (lastRun.get(key) ?? 0) + 5000 });
   }
   // 2. Military aircraft and emergency squawks, worldwide.
-  jobs.push({ key: 'mil', url: (P) => P.mil, cadence: 30, due: (lastRun.get('mil') ?? 0) + 20_000 });
+  // Each network hears different military traffic: ask every one of them.
+  jobs.push({ key: `mil:${lane}`, url: (P) => P.mil, cadence: 30, due: (lastRun.get(`mil:${lane}`) ?? 0) + 20_000 });
   for (const s of ['7700', '7600', '7500']) {
     jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000 });
   }

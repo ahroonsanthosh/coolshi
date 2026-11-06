@@ -53,6 +53,13 @@ class AppState {
     save('wf.layers', this.layers);
     this.emit('layers');
   }
+  /** Show only military aircraft (everything else on the map stays). */
+  milOnly = load<{ v: boolean }>('wf.milOnly', { v: false }).v;
+  setMilOnly(v: boolean) {
+    this.milOnly = v;
+    save('wf.milOnly', { v });
+    this.emit('filter');
+  }
   toggleFilter(f: AcFilter) {
     if (this.hidden.has(f)) this.hidden.delete(f);
     else this.hidden.add(f);

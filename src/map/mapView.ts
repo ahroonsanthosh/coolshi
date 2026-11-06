@@ -520,6 +520,7 @@ const ICON_SIZE: Record<string, number> = {
 };
 
 export function acHidden(a: Aircraft): boolean {
+  if (app.milOnly && !(a.row[A.flags] & AF.mil)) return true;
   const h = app.hidden;
   if (!h.size) return false;
   const ground = (a.row[A.flags] & AF.ground) !== 0;

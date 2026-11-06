@@ -186,6 +186,11 @@ function drawLayers() {
         <span class="desc">${desc}</span>
       </div>`).join('')}
     <h3>Show aircraft</h3>
+    <div class="tog" role="switch" tabindex="0" aria-checked="${app.milOnly}" data-milonly="1">
+      <span class="name">Military only<span class="count">${F.n0(n.military ?? 0)}</span><kbd>M</kbd></span>
+      <span class="sw"></span>
+      <span class="desc">Aircraft flagged military by the networks, the airframe database or their ICAO address block</span>
+    </div>
     <div class="chips">
       ${FILTERS.map(([k, label, icon]) => `<button class="fchip" data-filter="${k}" aria-pressed="${!app.hidden.has(k)}">${silhouetteSvg(icon, 13)}${label}<span class="n">${F.n0(n[k] ?? 0)}</span></button>`).join('')}
     </div>`;
@@ -197,11 +202,12 @@ export function initLayers() {
     const t = e.target as HTMLElement;
     const tog = t.closest<HTMLElement>('[data-layer]');
     if (tog) { const k = tog.dataset.layer as LayerKey; app.setLayer(k, !app.layers[k]); drawLayers(); }
+    if (t.closest('[data-milonly]')) { app.setMilOnly(!app.milOnly); drawLayers(); }
     const f = t.closest<HTMLElement>('[data-filter]');
     if (f) { app.toggleFilter(f.dataset.filter as AcFilter); drawLayers(); }
   });
   el.addEventListener('keydown', (e) => {
-    const tog = (e.target as HTMLElement).closest<HTMLElement>('[data-layer]');
+    const tog = (e.target as HTMLElement).closest<HTMLElement>('[data-layer], [data-milonly]');
     if (tog && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); tog.click(); }
   });
   setInterval(drawLayers, 3000);
@@ -371,6 +377,7 @@ export function openAbout() {
             <kbd>L</kbd><span>Layers and filters</span>
             <kbd>F</kbd><span>Follow the selected track</span>
             <kbd>G</kbd><span>Back to the whole globe</span>
+            <kbd>M</kbd><span>Military aircraft only</span>
             <kbd>W</kbd><span>Winds aloft, measured by aircraft</span>
             <kbd>R</kbd><span>Weather radar</span>
             <kbd>N</kbd><span>Day and night</span>
@@ -470,6 +477,7 @@ export function initKeys(handlers: { index: () => void; home: () => void }) {
     else if (k === 'g' || k === 'G') handlers.home();
     else if (k === 'r' || k === 'R') app.setLayer('radar', !app.layers.radar);
     else if (k === 'w' || k === 'W') app.setLayer('winds', !app.layers.winds);
+    else if (k === 'm' || k === 'M') app.setMilOnly(!app.milOnly);
     else if (k === 'n' || k === 'N') app.setLayer('night', !app.layers.night);
     else if (k === 'a' || k === 'A') app.setLayer('airports', !app.layers.airports);
     else if (k === 'e' || k === 'E') app.setLayer('quakes', !app.layers.quakes);
