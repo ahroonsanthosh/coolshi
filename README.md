@@ -51,7 +51,7 @@ This is where most of the work went.
 - **Solar position** uses the NOAA algorithm and agrees with an independent implementation to 0.01°. The ISS's sunlight takes its altitude into account (it sees the sun about 20° past the ground terminator).
 - **Coverage is stated honestly.** Volunteer receivers cover Europe and North America densely and oceans, much of Africa and Central Asia thinly. The About page lists every source with its live status.
 
-`npm test` covers the geodesy, solar position, feed parsing, merging, emergency confirmation and route verification.
+`npm test` covers the geodesy, solar position, ADS-B and AIS/NMEA parsing, merging, emergency confirmation, approximate military positions, route verification and estimated positions.
 
 ## Deploy
 
@@ -93,8 +93,10 @@ Everything is optional; copy `.env.example` to `.env`.
 | --- | --- |
 | `OPENSKY_CLIENT_ID`, `OPENSKY_CLIENT_SECRET` | A free OpenSky account raises the daily allowance from 400 to 4,000 credits. A worldwide poll costs 4, so anonymous access gives about four hours of world view a day at the default 150 s interval; an account keeps it live most of the day at 45 s. Polling only runs while someone is watching. |
 | `OPENSKY_POLL_S` | Seconds between worldwide polls. |
-| `AISSTREAM_API_KEY` | Worldwide ships from AISStream (free key at aisstream.io). Without it, ships come from Fintraffic's open feed for the Baltic. |
-| `PORT` | Port for the aggregator and the built site (default 8080). |
+| `OPENWATERS_TOKEN` | Ships already come worldwide from Open Waters without a key; a free personal token raises its rate limits. |
+| `AISSTREAM_API_KEY` | A second worldwide ship stream from AISStream (free key at aisstream.io). |
+| `PORT`, `HOST` | Port and bind address for the aggregator and the built site (default `8080` on `0.0.0.0`). |
+| `OPENSKY=off`, `OPENWATERS=off`, `KYSTVERKET=off` | Turn a feed off, for example on a host that a network refuses. |
 
 ### Free coverage, no keys
 
@@ -103,7 +105,7 @@ Without any keys, Watchman combines:
 - **OpenSky** for a worldwide aircraft snapshot (anonymous allowance).
 - **A worldwide sweep** across four volunteer ADS-B networks (adsb.fi, adsb.lol, airplanes.live, adsb.one): 349 circles of 250 nm placed wherever there are scheduled airports, busiest airspace every two minutes, the rest every five, each network kept under its published rate limit. It fills what OpenSky misses and carries the whole picture when OpenSky's credits run out (the status line then says `Live · regional`).
 - **Estimated positions beyond receiver range**, the way commercial trackers fill the oceans. When an airliner at cruise falls silent and its filed route is confirmed by its position and heading (within 30° of the destination), it is carried along the great circle to its destination at its last ground speed until about 20 minutes out, when receivers there should hear it again. Estimates are drawn as faded ghosts, labelled everywhere, kept out of every live count and headline, and replaced by the first real report.
-- **Worldwide by aircraft type.** adsb.lol, airplanes.live and adsb.one answer "every aircraft of this type, anywhere" in one request, so the server asks for the 60 most common types (ranked from live traffic) every few minutes. In testing that added about 15–20% more aircraft than the circle sweep alone.
+- **Worldwide by aircraft type.** adsb.lol, airplanes.live and adsb.one answer "every aircraft of this type, anywhere" in one request, so the server asks for up to 150 of the most common types (ranked from live traffic), plus military types, every few minutes. In testing that added about 15–20% more aircraft than the circle sweep alone.
 - **Military aircraft** from every network's military list each cycle (each hears different traffic), worldwide queries for military types (tankers, transports, patrol, AWACS, helicopters), and flagged by the airframe database, by types only air forces fly, and by the ICAO address blocks states reserve for military use. Military aircraft that answer radar with Mode S but broadcast no position are shown too, as rings at the rough area of the receivers hearing them, clearly marked approximate (they can be off by a hundred kilometres or more), with fast jets and bombers (F-16, F-15, F/A-18, F-35, F-22, B-1, B-2, B-52, Eurofighter, Rafale, Gripen, Hawk, M-346) searched for by type worldwide. Press `M` to show only military. Only aircraft that transmit something can be shown; most combat sorties don't.
 - **Your view**, refreshed every five seconds from the same networks, plus worldwide military aircraft and emergency squawks.
 - **Ships worldwide** from Open Waters AIS, an open network that merges government feeds, AISHub, aisstream.io and volunteer receivers and needs no key: the server sweeps the world's seas in 10° boxes (busy ones every 3 minutes, empty ones hourly) within its anonymous limits, and polls whatever you are looking at every 20 seconds. Plus Fintraffic (Baltic) and Kystverket (Norway) directly. Around 40,000 ships within two minutes of starting; the browser receives only those in view (up to 12,000). An optional free token (`OPENWATERS_TOKEN`) raises the limits.
@@ -113,20 +115,23 @@ An AISStream key (`AISSTREAM_API_KEY`) adds a second worldwide ship stream. Some
 ## How it works
 
 ```
-OpenSky (world, every 150 s) ─┐
-adsb.fi / adsb.lol (your view │
-  every 5 s, military,        ├─► server/store.ts ─► /api/air  (deltas) ─┐
-  emergency squawks) ─────────┤    merge by address,  /api/sea           ├─► browser: dead reckoning,
-Fintraffic AIS, AISStream ────┤    newest position    /api/world         │   MapLibre globe, panels,
-USGS, GDACS, ISS ─────────────┘    wins, history      /api/history/...  ─┘   three.js Index
-tar1090 aircraft database ────────► types, registrations
+OpenSky (world snapshot) ──────────┐
+adsb.fi / adsb.lol /               │
+  airplanes.live / adsb.one        │
+  (your view, worldwide sweep,     ├─► server/store.ts ─► /api/air     (deltas) ─┐
+  types, military, squawks) ───────┤    merge by address, /api/sea               │
+Open Waters, Fintraffic,           │    newest position   /api/world             ├─► browser: dead reckoning,
+  Kystverket, AISStream (AIS) ─────┤    wins, history     /api/winds, /api/metar │   MapLibre globe, panels,
+USGS, GDACS, ISS, NOAA METAR ──────┘                      /api/detail, /history ─┘   three.js Index
+tar1090 aircraft database ─────────► types, registrations, military flag
+server/estimates.ts ───────────────► positions beyond receiver range
 ```
 
-- `server/` the aggregator: feeds, the merged store, HTTP. Each browser reports what it is looking at, and the ADS-B networks are asked about those areas, paced to their published limits (adsb.fi one request a second; adsb.lol more gently).
+- `server/` the aggregator: `feeds/` (one module per source), `store.ts` (the merged picture), `estimates.ts` (positions beyond receiver range), `aircraftDb.ts` (the airframe database), `grid.ts` (the worldwide sweep), and `index.ts` (scheduling and HTTP). Each browser reports what it is looking at, and the ADS-B networks are asked about those areas, paced to their published limits (adsb.fi one request a second; the others more gently). Viewer areas, military lists and emergency squawks are scheduled ahead of the worldwide sweeps. `/healthz` reports counts and the status of every source.
 - `shared/` geodesy, solar position and the wire format, used by both sides.
-- `src/` the client: `map/` (style, icons, layers, render loop), `ui/` (sheet, search, layers, about), `gallery/` (posters and the cloth renderer), `lib/` (aircraft and AIS tables, enrichment, formatting).
+- `src/` the client: `map/` (style, icons, layers, render loop), `state/` (app state, data polling, winds aloft), `ui/` (sheet, search, layers, about), `gallery/` (posters and the cloth renderer), `lib/` (aircraft and AIS tables, enrichment, formatting), `data/` (airports, countries, coastline, military address blocks). `npm run airports` rebuilds the airport list from OurAirports.
 
-Photos (Planespotters), airframes and routes (adsbdb), ship particulars (Wikidata) and radar (RainViewer) are fetched by the browser on demand.
+Photos (Planespotters), airframes and routes (adsbdb), ship particulars (Wikidata) and radar (RainViewer) are fetched by the browser on demand; airport weather and ship registry details go through the server.
 
 ## Keys
 
@@ -146,4 +151,4 @@ Links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) open with that trac
 
 ## Data and credits
 
-Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.
+Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; NOAA Aviation Weather Center; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.
