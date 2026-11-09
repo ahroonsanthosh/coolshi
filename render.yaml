@@ -5,7 +5,7 @@ services:
     runtime: node
     rootDir: watchman
     plan: free
-    branch: claude/practical-mccarthy-yfijni
+    branch: claude/funny-davinci-fwx5ce
     buildCommand: npm ci --include=dev && npm run build
     startCommand: node server/index.ts
     healthCheckPath: /healthz
