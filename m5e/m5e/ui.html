@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>m5e review</title>
+<style>
+  :root { --bg:#0e0f11; --panel:#17191c; --line:#2a2d32; --text:#e9eaec; --dim:#9aa0a6; --accent:#7cdb8a;
+          --warn:#ffb454; --bad:#ff6b6b; --must:#6bb5ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; }
+  header b { font-size:16px; letter-spacing:.5px; }
+  #status { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; }
+  .pill { padding:2px 8px; border-radius:99px; background:var(--panel); border:1px solid var(--line); font-size:12px; }
+  main { display:grid; grid-template-columns:minmax(260px,360px) minmax(0,1fr); gap:16px; padding:16px; }
+  main > div { min-width:0; }
+  @media (max-width:860px){ main{ grid-template-columns:minmax(0,1fr); } header #status{ display:none; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:16px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.8px; color:var(--dim); margin:0 0 10px; }
+  video { width:100%; aspect-ratio:9/16; background:#000; border-radius:8px; }
+  label { display:block; color:var(--dim); font-size:12px; margin:8px 0 4px; }
+  textarea, input { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
+  button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; cursor:pointer; font:inherit; }
+  button:hover { border-color:var(--dim); }
+  button.primary { background:var(--accent); color:#0b1a0e; border-color:var(--accent); font-weight:600; width:100%; padding:10px; margin-top:10px; }
+  button.on.ban { background:var(--bad); color:#200; border-color:var(--bad); }
+  button.on.must { background:var(--must); color:#021; border-color:var(--must); }
+  button:disabled { opacity:.5; cursor:default; }
+  .warn { color:var(--warn); margin:4px 0; }
+  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  .tabs button.active { border-color:var(--accent); color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr)); gap:12px; }
+  .card { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--bg); }
+  .card.used { border-color:var(--accent); }
+  .card.banned { opacity:.45; }
+  .card img { width:100%; display:block; background:#000; }
+  .card .body { padding:8px; }
+  .meta { color:var(--dim); font-size:12px; }
+  .flags { color:var(--warn); font-size:12px; }
+  .row { display:flex; gap:6px; margin-top:6px; }
+  table { width:100%; border-collapse:collapse; }
+  td { border-top:1px solid var(--line); padding:6px 4px; vertical-align:top; overflow-wrap:anywhere; }
+  td.t { color:var(--dim); white-space:nowrap; font-variant-numeric:tabular-nums; width:1%; }
+  td.img { width:1%; }
+  td.img img { height:56px; border-radius:4px; display:block; }
+  td.txt { width:100%; }
+  @media (max-width:600px){ td.img img { height:40px; } }
+  #log { white-space:pre-wrap; font:12px ui-monospace,Menlo,monospace; color:var(--dim); max-height:220px; overflow:auto; }
+  .score { font-weight:600; }
+</style>
+</head>
+<body>
+<header><b>m5e</b><span class="pill" id="mode">…</span><span id="status">loading…</span></header>
+<main>
+  <div>
+    <section>
+      <h2>The reel</h2>
+      <video id="video" controls playsinline></video>
+      <label for="brief">Brief for the AI editor (optional)</label>
+      <textarea id="brief" rows="3" placeholder="e.g. open on the pitch result, keep it under 35s, end on the group photo"></textarea>
+      <label for="pace">Average shot length (seconds)</label>
+      <input id="pace" type="number" step="0.1" min="0.6" max="3">
+      <button class="primary" id="recut">Re-cut with my changes</button>
+      <div id="warnings"></div>
+    </section>
+    <section id="aiBox" hidden>
+      <h2>AI editor</h2>
+      <div id="ai"></div>
+    </section>
+    <section>
+      <h2>Log</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>The cut</h2>
+      <table id="cut"></table>
+    </section>
+    <section>
+      <h2>All shots</h2>
+      <div class="tabs" id="tabs"></div>
+      <input id="search" placeholder="Search shots (what's in them, file name, id)…">
+      <div style="height:10px"></div>
+      <div class="grid" id="grid"></div>
+    </section>
+    <section>
+      <h2>Clips and what was dropped</h2>
+      <table id="clips"></table>
+    </section>
+  </div>
+</main>
+<script>
+let S = null, tab = "all", ban = new Set(), must = new Set(), dirty = false, lastVideo = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const TABS = [["all","All"],["used","In the cut"],["unused","Unused"],["flagged","Flagged"],["ban","Banned"],["must","Must use"]];
+
+async function load() {
+  try {
+    const r = await fetch("/api/state"); S = await r.json();
+  } catch (e) { $("status").textContent = "lost connection to m5e"; return; }
+  if (!dirty) { ban = new Set(S.ban); must = new Set(S.must); }
+  render();
+  setTimeout(load, S.busy ? 1500 : 5000);
+}
+
+function render() {
+  $("mode").textContent = S.mode ? ({vo:"voiceover", talk:"natural sound", montage:"montage"}[S.mode] || S.mode) : "…";
+  $("status").textContent = S.busy ? (S.logs[S.logs.length-1] || "working…") : (S.folder);
+  $("recut").disabled = S.busy;
+  if (S.video && S.video !== lastVideo) { $("video").src = S.video; lastVideo = S.video; }
+  if (document.activeElement !== $("brief") && !dirty) $("brief").value = S.brief || "";
+  if (document.activeElement !== $("pace") && !dirty) $("pace").value = S.pace ?? "";
+  $("warnings").innerHTML = (S.warnings||[]).map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
+  const ai = [];
+  if (S.ai && S.ai.hook) ai.push(`<p><b>Hook:</b> ${esc(S.ai.hook)}</p>`);
+  if (S.ai && S.ai.vo_feedback) ai.push(`<p><b>On the voiceover:</b> ${esc(S.ai.vo_feedback)}</p>`);
+  (S.reviews||[]).forEach((r,i) => ai.push(`<p><span class="score">Review ${i+1}: ${r.score}/10</span>${r.ship_it?" – ship it":""}<br>${
+      r.fixes.map(f => `• seg ${f.segment}: ${esc(f.problem)}`).join("<br>")}</p>`));
+  $("aiBox").hidden = !ai.length; $("ai").innerHTML = ai.join("");
+  $("log").textContent = (S.logs||[]).join("\n"); $("log").scrollTop = 1e9;
+
+  $("cut").innerHTML = (S.timeline||[]).map(s => `<tr>
+      <td class="t">${s.t0.toFixed(2)}–${s.t1.toFixed(2)}s</td>
+      <td class="img">${s.shot ? `<img src="/files/m5e_project/strips/${esc(s.shot)}.jpg" loading="lazy" alt="">` : ""}</td>
+      <td class="txt"><b>${esc(s.shot || s.clip)}</b> ${esc(s.note)}<br><span class="meta">${s.said ? "“" + esc(s.said) + "”" : "(no words)"}${s.why ? " · " + esc(s.why) : ""}</span></td>
+      <td>${s.shot ? `<button data-ban="${esc(s.shot)}">Ban</button>` : ""}</td></tr>`).join("") || "<tr><td>No cut yet.</td></tr>";
+
+  $("tabs").innerHTML = TABS.map(([k,l]) => `<button class="${tab===k?"active":""}" data-tab="${k}">${l}</button>`).join("");
+  const q = $("search").value.toLowerCase();
+  const list = (S.candidates||[]).filter(c => {
+    const flagged = c.flags.length || !c.focus_ok || c.filler;
+    if (tab==="used" && !c.used) return false;
+    if (tab==="unused" && c.used) return false;
+    if (tab==="flagged" && !flagged) return false;
+    if (tab==="ban" && !ban.has(c.id)) return false;
+    if (tab==="must" && !must.has(c.id)) return false;
+    return !q || (c.id+" "+c.file+" "+c.note+" "+c.type).toLowerCase().includes(q);
+  });
+  $("grid").innerHTML = list.map(c => {
+    const flags = [...c.flags]; if (!c.focus_ok) flags.push("AI: soft focus"); if (c.filler) flags.push("AI: filler");
+    return `<div class="card ${c.used?"used":""} ${ban.has(c.id)?"banned":""}">
+      <img src="/files/m5e_project/strips/${esc(c.id)}.jpg" loading="lazy" alt="">
+      <div class="body">
+        <div><b>${esc(c.id)}</b> <span class="meta">${esc(c.file)} @ ${c.start.toFixed(1)}–${c.end.toFixed(1)}s · score ${c.score.toFixed(2)}${c.used?" · in the cut":""}</span></div>
+        ${c.note ? `<div>${esc(c.note)}</div>` : ""}
+        ${flags.length ? `<div class="flags">${esc(flags.join(" · "))}</div>` : ""}
+        <div class="row">
+          <button class="ban ${ban.has(c.id)?"on":""}" data-ban="${esc(c.id)}">${ban.has(c.id)?"Banned":"Ban"}</button>
+          <button class="must ${must.has(c.id)?"on":""}" data-must="${esc(c.id)}">${must.has(c.id)?"Must use ✓":"Must use"}</button>
+        </div>
+      </div></div>`;
+  }).join("") || `<div class="meta">No shots here.</div>`;
+
+  $("clips").innerHTML = (S.clips||[]).map(c => `<tr><td><b>${esc(c.clip)}</b> ${esc(c.file)}</td><td class="t">${c.dur}s</td>
+      <td>${c.shots} usable shot(s)</td><td class="meta">${Object.entries(c.dropped).map(([k,v]) => `${v}s ${esc(k)}`).join("<br>") || "nothing dropped"}</td></tr>`).join("");
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.tab) { tab = b.dataset.tab; render(); return; }
+  if (b.dataset.ban) { const id = b.dataset.ban; ban.has(id) ? ban.delete(id) : (ban.add(id), must.delete(id)); await save(); return; }
+  if (b.dataset.must) { const id = b.dataset.must; must.has(id) ? must.delete(id) : (must.add(id), ban.delete(id)); await save(); return; }
+  if (b.id === "recut") {
+    dirty = false;
+    await fetch("/api/recut", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ban:[...ban], must:[...must], brief:$("brief").value, pace:$("pace").value})});
+    load();
+  }
+});
+async function save() {
+  dirty = true; render();
+  await fetch("/api/update", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ban:[...ban], must:[...must]})});
+}
+$("search").addEventListener("input", () => render());
+["brief","pace"].forEach(id => $(id).addEventListener("input", () => { dirty = true; }));
+load();
+</script>
+</body>
+</html>
