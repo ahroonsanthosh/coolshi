@@ -44,10 +44,23 @@ CAPTION = {
 }
 
 # ---- Cutting ----------------------------------------------------------------
-PACE = 1.4                # target average shot length (s). London reels: 1.2, NYC: 1.8
+PACE = 1.4                # fallback average shot length (s); normally the editing profile's rhythm curve is used
+PROFILE = "krios"         # editing profile measured from the account's reels (profiles/krios.json)
 MIN_SHOT = 0.45
 MAX_SHOT = 3.2
-CUT_LEAD = 0.04           # cut this much before the word onset, so the picture lands with the word
+CUT_LEAD = 0.06           # the picture changes 2 frames before the word starts, so it lands WITH the word
+# Quick-cut bursts: 3-4 shots in quick succession where the story arrives somewhere new.
+BURST = {"shot": 0.32, "min_shot": 0.22, "max_shot": 0.45}
+
+# ---- Sound design -------------------------------------------------------------
+# One sound per purpose, never on every cut. Levels are relative to the voice (research: 6-12 dB under it).
+SFX_RULES = {"max_whoosh": 2, "max_riser": 1, "min_gap": 1.5, "riser_max": 2.6}
+# Peak levels relative to the voice's peak; calibrated so each effect MEASURES 6-12 dB under the voice over a 50 ms
+# window (how the ear judges a short sound). Clicks are 25 ms long, so they need a much higher peak to be heard at all.
+SFX_LEVELS_DB = {"click": -2, "pop": -13, "whoosh": -16, "riser": -14, "hit": -13, "shutter": -3}
+MUSIC_UNDER_VO_DB = 13.0  # music bed this far under the voice (loudness); with ducking this measures like the
+                          # account's own reels (bed ~4-6 dB under speech in the pauses)
+AMBIENCE_UNDER_VO_DB = 22.0   # natural sound from the clips, tucked under the voice, rising a little in pauses
 
 # ---- Voiceover (DJI Mic Mini) -----------------------------------------------
 VO_FILTER = "highpass=f=80,acompressor=threshold=-20dB:ratio=3:attack=5:release=120:makeup=2"
@@ -71,6 +84,30 @@ FIXES = {
     r"\b(Creos|Krias|Kreos|Krious|Kreos|Kryos|Chris's)\b": "Krios",
     r"\bselling school\b": "still in school",
 }
+
+# How the best short-form / day-in-the-life editors cut (research summary), fed to the AI director and reviewer.
+PLAYBOOK = """
+Editing playbook (what top short-form / day-in-the-life editors do):
+- Hook: the first 1-2 seconds earn the rest. Open on the strongest image (a face close to the lens, a reaction, a
+  surprising object) or a cold open borrowed from later in the day; never on an establishing wide or a corridor.
+- Give an ordinary day an arc: set-up -> movement -> moments -> payoff. Keep the day's order unless breaking it
+  makes a better hook. Contrast busy and quiet moments; faster mid-day, a touch slower at night.
+- Show what's said: when the voiceover names a place, thing, person or action, it is on screen as the word lands.
+  The picture leads the word by a couple of frames; cut on phrase starts and content words, not mid-word.
+- Shot length follows the energy of the line: quick on lists and travel, holds on faces, reactions and payoffs.
+  Trim every b-roll shot to its strongest moment. Cut on movement when you can.
+- Change something at every cut (shot size, angle, subject). Never two near-identical framings back to back.
+- Quick-cut bursts: 3-4 different shots, ~0.25-0.4s each, when the story arrives somewhere new or lists things.
+  Sparingly: one or two per reel.
+- Sound design is subtle and purposeful - one sound per job, never on every cut:
+  click = a quick cut inside a burst; pop = the start of a burst or something popping in; whoosh = a real
+  location change (peak on the cut); riser = building into a genuine reveal/payoff, its end exactly on the reveal
+  frame, at most one or two per reel; hit = the reveal landing (only after a riser); shutter = a photo moment.
+  Effects sit 6-12 dB under the voice. No flashy transitions - hard cuts only.
+- Ambience/natural sound under b-roll (silence under cutaways feels wrong), tucked under the voice. Music: one
+  track, under the voice; cuts and bursts sit on its beat where the words allow.
+- End on a face or the payoff, held long enough to land; never on filler.
+""".strip()
 
 # What we learnt from the account's own numbers; fed to the AI editor as house rules.
 HOUSE_RULES = """

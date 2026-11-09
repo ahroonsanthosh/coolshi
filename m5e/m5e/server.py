@@ -101,7 +101,9 @@ class Session:
                 "must": st.get("must", []), "candidates": cands, "clips": rejected, "timeline": timeline,
                 "video": f"/files/{OUT}/{videos[0].name}?v={int(videos[0].stat().st_mtime)}" if videos else None,
                 "warnings": st.get("warnings", []), "reviews": st.get("reviews", []), "ai": st.get("ai_notes", {}),
-                "brief": cfg.get("brief", ""), "pace": cfg.get("pace"), "mode": getattr(p, "mode", None),
+                "quality": st.get("quality"), "sfx": st.get("sfx", []),
+                "brief": cfg.get("brief", ""), "pace": p._user_cfg.get("pace") if p is not None else None,
+                "mode": getattr(p, "mode", None),
                 "captions_mtime": cap}
 
     def update(self, data: dict):
@@ -115,7 +117,12 @@ class Session:
         cfg = json.loads(cfgp.read_text()) if cfgp.exists() else {}
         changed = False
         for k in ("brief", "pace"):
-            if k in data and data[k] not in (None, ""):
+            if k in data:
+                if data[k] in (None, ""):
+                    if k == "pace" and "pace" in cfg:   # cleared: back to the profile's rhythm
+                        del cfg["pace"]
+                        changed = True
+                    continue
                 cfg[k] = float(data[k]) if k == "pace" else data[k]
                 changed = True
         if changed:
@@ -201,11 +208,21 @@ def make_handler(sess: Session):
     return H
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        import sys
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            return   # the browser stopped a video download mid-way: normal, not an error
+        super().handle_error(request, client_address)
+
+
 def serve(folder: str, port: int = 8765, open_browser: bool = True):
     sess = Session(folder)
     have_cut = any((sess.folder / OUT).glob("*.mp4")) if (sess.folder / OUT).exists() else False
     sess.run("load" if have_cut else "all")
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sess))
+    srv = _Server(("127.0.0.1", port), make_handler(sess))
     url = f"http://localhost:{port}"
     print(f"m5e review page: {url}  (Ctrl+C to stop)")
     if open_browser:

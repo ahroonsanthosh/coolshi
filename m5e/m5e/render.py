@@ -1,6 +1,7 @@
 """Render the timeline: lossless per-shot intermediates -> one high-quality final encode with captions."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from . import audio, media
@@ -108,8 +109,117 @@ def talk_audio(timeline, clips, work: Path) -> Path:
     return out
 
 
+def ambience_track(timeline, clips, work: Path) -> Path | None:
+    """Each shot's own sound (what you see is what you hear), with tiny fades at the cuts."""
+    if not any(clips[s.get("v_clip", s["clip"])].get("has_audio") for s in timeline):
+        return None
+    files = []
+    for i, s in enumerate(timeline):
+        info = clips[s.get("v_clip", s["clip"])]
+        d = s["frames"] / FPS
+        f = work / f"amb_{i:03d}.wav"
+        if info.get("has_audio"):
+            media.run(["ffmpeg", "-v", "error", "-y", "-nostdin", "-ss", f"{s.get('v_src_in', s['src_in']):.3f}",
+                       "-i", info["path"], "-t", f"{d:.4f}", "-vn",
+                       "-af", f"afade=t=in:d=0.02,afade=t=out:st={max(d - 0.02, 0):.4f}:d=0.02,apad=whole_dur={d:.4f}",
+                       "-ar", "48000", "-ac", "2", "-c:a", "pcm_s24le", str(f)])
+        else:
+            media.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", f"{d:.4f}",
+                       "-c:a", "pcm_s24le", str(f)])
+        files.append(f)
+    out = work / "ambience.wav"
+    lst = work / "ambience.txt"
+    lst.write_text("".join(f"file '{f.resolve().as_posix()}'\n" for f in files))
+    media.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
+    return out
+
+
+def _loudness(path: Path) -> float | None:
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-af", "ebur128", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = [ln for ln in r.stderr.splitlines() if ln.strip().startswith("I:")]
+    try:
+        v = float(m[-1].split()[1])
+        return v if v > -70 else None
+    except (IndexError, ValueError):
+        return None
+
+
+def mix_audio(work: Path, total: float, voice: Path | None, voice_is_vo: bool = True, ambience: Path | None = None,
+              music: str | None = None, sfx_track: Path | None = None) -> Path | None:
+    """Voice at -14 LUFS; ambience tucked ~22 dB under it and ducked while it speaks (so it breathes in the
+    pauses); music ~8 dB under it, ducked a further few dB under speech; sound effects on top; limiter;
+    final two-pass loudness to -14 LUFS / -1 dBTP."""
+    from .style import AMBIENCE_UNDER_VO_DB, MUSIC_UNDER_VO_DB
+    if voice is None and music is None:
+        return None
+    stems = []
+    vo = work / "stem_voice.wav"
+    if voice is not None:
+        chain = audio.vo_chain(str(voice)) if voice_is_vo else audio.loudnorm_filter(str(voice))
+        media.run(["ffmpeg", "-v", "error", "-y", "-i", str(voice), "-af", chain + ",aformat=channel_layouts=stereo",
+                   "-ar", "48000", "-t", f"{total:.3f}", "-c:a", "pcm_s24le", str(vo)])
+        stems.append(("voice", vo))
+
+    def bed(src, name, under, extra=""):
+        out = work / f"stem_{name}.wav"
+        lv = _loudness(Path(src))
+        if lv is None:
+            return None
+        gain = (TARGET_LUFS - under) - lv
+        loop = ["-stream_loop", "-1"] if name == "music" else []
+        media.run(["ffmpeg", "-v", "error", "-y", *loop, "-i", str(src), "-t", f"{total:.3f}", "-af",
+                   ",".join(filter(None, [extra, f"volume={gain:.2f}dB", "aformat=channel_layouts=stereo",
+                                          f"afade=t=out:st={max(total - 1.2, 0):.3f}:d=1.2" if name == "music" else ""])),
+                   "-ar", "48000", "-c:a", "pcm_s24le", str(out)])
+        return out
+
+    amb = bed(ambience, "ambience", AMBIENCE_UNDER_VO_DB if voice_is_vo else 0,
+              "highpass=f=100,lowpass=f=10000") if (ambience is not None and voice_is_vo) else None
+    mus = bed(music, "music", MUSIC_UNDER_VO_DB if voice is not None else 0) if music else None
+    inputs, fc, mix_in = [], [], []
+    for p_ in [vo if voice is not None else None, amb, mus, sfx_track]:
+        if p_ is not None:
+            inputs += ["-i", str(p_)]
+    idx = 0
+    labels = {}
+    for name, p_ in [("voice", vo if voice is not None else None), ("amb", amb), ("mus", mus), ("sfx", sfx_track)]:
+        if p_ is not None:
+            labels[name] = f"[{idx}:a]"
+            idx += 1
+    keys = []
+    if "voice" in labels:
+        n_keys = sum(1 for k in ("amb", "mus") if k in labels)
+        if n_keys:
+            fc.append(f"{labels['voice']}asplit={n_keys + 1}[v0]" + "".join(f"[k{i}]" for i in range(n_keys)))
+            keys = [f"[k{i}]" for i in range(n_keys)]
+            mix_in.append("[v0]")
+        else:
+            mix_in.append(labels["voice"])
+    ki = 0
+    for name, thr, ratio in (("amb", 0.02, 4), ("mus", 0.025, 3.5)):
+        if name in labels:
+            if keys:
+                fc.append(f"{labels[name]}{keys[ki]}sidechaincompress=threshold={thr}:ratio={ratio}:attack=15:release=280[{name}d]")
+                ki += 1
+                mix_in.append(f"[{name}d]")
+            else:
+                mix_in.append(labels[name])
+    if "sfx" in labels:
+        mix_in.append(labels["sfx"])
+    fc.append("".join(mix_in) + f"amix=inputs={len(mix_in)}:normalize=0:duration=longest,"
+              f"atrim=0:{total:.3f},alimiter=limit=0.89:level=false[mix]")
+    pre = work / "mix_pre.wav"
+    media.run(["ffmpeg", "-v", "error", "-y", *inputs, "-filter_complex", ";".join(fc), "-map", "[mix]",
+               "-ar", "48000", "-c:a", "pcm_s24le", str(pre)])
+    out = work / "mix.wav"
+    media.run(["ffmpeg", "-v", "error", "-y", "-i", str(pre), "-af", audio.loudnorm_filter(str(pre)),
+               "-ar", "48000", "-c:a", "pcm_s24le", str(out)])
+    return out
+
+
 def final(video: Path, ass: Path | None, voice: Path | None, out: Path, total: float, music: str | None = None,
-          voice_is_vo: bool = True) -> Path:
+          voice_is_vo: bool = True, mixed: Path | None = None) -> Path:
     cmd = ["ffmpeg", "-v", "error", "-y", "-nostdin", "-i", str(video)]
     fc = []
     vin = "[0:v]"
@@ -117,7 +227,10 @@ def final(video: Path, ass: Path | None, voice: Path | None, out: Path, total: f
         fc.append(f"{vin}subtitles=filename='{ass.as_posix()}':fontsdir='{FONTS_DIR.as_posix()}'[v]")
         vin = "[v]"
     amap = None
-    if voice:
+    if mixed is not None:
+        cmd += ["-i", str(mixed)]
+        amap = "1:a"
+    elif voice:
         cmd += ["-i", str(voice)]
         chain = audio.vo_chain(str(voice)) if voice_is_vo else audio.loudnorm_filter(str(voice))
         fc.append(f"[1:a]{chain},aformat=channel_layouts=stereo,apad[vo]")

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .style import CUT_LEAD, MAX_SHOT, MIN_SHOT
+from .analyze import hamming
+from .style import BURST, CUT_LEAD, MAX_SHOT, MIN_SHOT
 
 
 def eligible(cands: list[dict], notes: dict, banned: set, strict: bool = True) -> list[dict]:
@@ -116,75 +117,6 @@ def onsets(words: list[dict]) -> list[float]:
     return [max(w["s"] - CUT_LEAD, 0.0) for w in words]
 
 
-def cut_points(words: list[dict], vo_dur: float, pace: float, template: list[float] | None = None) -> list[float]:
-    """Cut times on word onsets, aiming at `pace` seconds per shot (or following a reference video's
-    rhythm, mapped by position: the first 10% of ours follows the first 10% of the reference), preferring
-    clause starts."""
-    ons = onsets(words)
-    pace_at = pace_curve(vo_dur, pace, template)
-    cuts = [0.0]
-    t = 0.0
-    while True:
-        step = pace_at(t)
-        if vo_dur - t < step * 1.5:
-            break
-        best, best_cost = None, 1e9
-        for i, o in enumerate(ons):
-            if o < t + MIN_SHOT or o > t + MAX_SHOT or vo_dur - o < MIN_SHOT:
-                continue
-            cost = abs(o - (t + step))
-            if i > 0 and words[i - 1]["w"].endswith((".", ",", "?", "!", ";", ":")):
-                cost -= min(0.25 * step, 0.35)  # prefer the start of a clause, in proportion to the shot
-            if cost < best_cost:
-                best, best_cost = o, cost
-        if best is None:
-            break
-        cuts.append(best)
-        t = best
-    return cuts
-
-
-def heuristic_vo(words, vo_dur, cands, notes, metrics_by_clip, clip_order, pace, banned=(), must=(), template=None):
-    """Rule-based editor: strongest opener first, then the best shot from each stretch of the day, in order."""
-    pool = eligible(cands, notes, set(banned)) or eligible(cands, notes, set(banned), strict=False)
-    if not pool:
-        raise RuntimeError("No usable footage: every clip was out of focus, too dark or too shaky.")
-    cuts = cut_points(words, vo_dur, pace, template)
-    if len(pool) < len(cuts):
-        cuts = cut_points(words, vo_dur, vo_dur / len(pool))
-    pool.sort(key=lambda c: (clip_order[c["clip"]], c["start"]))
-
-    def hook_val(c):
-        n = notes.get(c["id"], {})
-        return n.get("hook", 0) * 0.3 + min(c["face"] * 4, 1) + c["score"]
-
-    hook = max(pool, key=hook_val)
-    rest = [c for c in pool if c is not hook]
-    must_ids = set(must)
-    picks = []
-    if len(cuts) > 1 and rest:
-        for b in np.array_split(np.arange(len(rest)), min(len(cuts) - 1, len(rest))):
-            if len(b):
-                picks.append(max((rest[i] for i in b), key=lambda c: c["score"]))
-    for c in (c for c in rest if c["id"] in must_ids and c not in picks):
-        weakest = min((p for p in picks if p["id"] not in must_ids), key=lambda p: p["score"], default=None)
-        if weakest is not None:
-            picks[picks.index(weakest)] = c
-    picks.sort(key=lambda c: (clip_order[c["clip"]], c["start"]))
-    # end on a face, not on a corridor: pull the best face shot from the last third of the day to the end
-    if len(picks) >= 3 and (picks[-1]["face"] < 0.08 or picks[-1]["run"][1] - picks[-1]["run"][0] < 1.2):
-        tail = picks[-max(2, len(picks) // 3):]
-        # it has to be able to hold the ending, not just flash by
-        face = max((c for c in tail if c["face"] >= 0.08 and c["run"][1] - c["run"][0] >= 1.2),
-                   key=lambda c: (c["face"], c["score"]), default=None)
-        if face is not None:
-            picks.remove(face)
-            picks.append(face)
-    chosen = [hook] + picks
-    return [{"t0": cuts[i], "shot": chosen[i]["id"], "offset": None, "why": "auto"}
-            for i in range(min(len(cuts), len(chosen)))]
-
-
 def vo_plan_to_seq(segs: list[dict], words: list[dict]) -> list[dict]:
     """AI plans name the word a shot starts on; convert to times."""
     ons = onsets(words)
@@ -195,10 +127,19 @@ def vo_plan_to_seq(segs: list[dict], words: list[dict]) -> list[dict]:
     return out
 
 
-def pace_curve(vo_dur: float, pace: float, template: list[float] | None):
-    """Target shot length at time t: flat `pace`, or a reference video's rhythm stretched to this length."""
+def pace_curve(vo_dur: float, pace: float, template):
+    """Target shot length at time t. `template` is either a reference video's shot list (its rhythm is
+    mapped by position and stretched only if the lengths differ a lot) or an editing-profile curve
+    {"curve": [median shot length per tenth]} (used as-is: a profile is a rhythm, not a length)."""
     if not template:
         return lambda t: pace
+    if isinstance(template, dict) and template.get("curve"):
+        curve = [c for c in template["curve"] if c] or [pace]
+
+        def at_curve(t):
+            f = min(max(t / max(vo_dur, 1e-6), 0.0), 0.999)
+            return min(max(curve[min(int(f * len(curve)), len(curve) - 1)], MIN_SHOT), MAX_SHOT)
+        return at_curve
     tpl = [min(max(x, MIN_SHOT), MAX_SHOT) for x in template]
     total = sum(tpl)
     edges = np.cumsum([0.0] + tpl) / total
@@ -224,7 +165,8 @@ def build_vo_timeline(seq, words, vo_dur, cands, notes, metrics_by_clip, banned=
     fo = Footage(cands, metrics_by_clip, notes)
     banned = set(banned)
     pace_at = pace_curve(vo_dur, pace, template)
-    seq = sorted((s for s in seq if s["shot"] in fo.by_id and s["shot"] not in banned), key=lambda s: s["t0"])
+    seq = sorted((s for s in seq if s.get("burst") or (s["shot"] in fo.by_id and s["shot"] not in banned)),
+                 key=lambda s: s["t0"])
     if seq:
         seq[0] = {**seq[0], "t0": 0.0}
     ons = onsets(words)
@@ -238,16 +180,68 @@ def build_vo_timeline(seq, words, vo_dur, cands, notes, metrics_by_clip, banned=
         opts = [o for o in ons if lo - 1e-6 <= o <= hi + 1e-6]
         return min(opts, key=lambda o: abs(o - target)) if opts else None
 
-    def place(c, end, why, offset=None, overlap=False):
+    def place(c, end, why, offset=None, overlap=False, burst=False):
         nonlocal t
         dur = round(end - t, 3)
         src = fo.take(c, dur, offset, allow_overlap=overlap)
         dur = min(dur, round(c["run"][1] - src, 3)) if overlap else dur
         end = t + dur
-        timeline.append({"shot": c["id"], "clip": c["clip"], "src_in": src, "dur": round(dur, 3),
-                         "t0": round(t, 3), "t1": round(end, 3), "why": why, "face_cx": c.get("face_cx")})
+        seg = {"shot": c["id"], "clip": c["clip"], "src_in": src, "dur": round(dur, 3),
+               "t0": round(t, 3), "t1": round(end, 3), "why": why, "face_cx": c.get("face_cx")}
+        if burst:
+            seg["burst_part"] = True
+        timeline.append(seg)
         last_seen[c["id"]] = end
         t = end
+
+    def place_burst(s):
+        """3-4 quick, all-different shots, each exactly one planned slice long (a musical subdivision when
+        there's music, so every burst cut lands on the beat). Shots without enough clean footage are swapped
+        for fresh ones; any leftover time goes to the next shot rather than stretching the burst off-beat."""
+        d = max((s["t1"] - s["t0"]) / max(len(s["burst"]), 1), BURST["min_shot"])
+        shots = [fo.by_id[x] for x in s["burst"] if x in fo.by_id and x not in banned]
+        shots = [c for i, c in enumerate(shots) if c["id"] not in {x["id"] for x in shots[:i]}]
+        # a burst needs at least 3 different clean shots that can actually play right now; 2 is a stutter
+        ready = [c for c in shots if fo.free_len(c) >= d]
+        spare = [x for x in pool if x["id"] not in s["burst"] and fo.free_len(x) >= d
+                 and x["id"] not in {y["shot"] for y in timeline[-4:]}]
+        if len(ready) + min(len(spare), len(shots) - len(ready)) < 3:
+            return False
+        # start exactly where it was planned (on the beat): stretch the previous shot if its footage allows,
+        # otherwise cover the little gap, so the burst doesn't slide off the grid
+        if timeline and s["t0"] - t > 1.0 / 60:
+            last = timeline[-1]
+            c0 = fo.by_id[last["shot"]]
+            need = s["t0"] - last["t0"]
+            if not last.get("burst_part") and last["src_in"] + need <= c0["run"][1] and need <= MAX_SHOT:
+                last["t1"] = round(s["t0"], 3)
+                last["dur"] = round(need, 3)
+                fo.used.setdefault(fo._key(c0), []).append((last["src_in"], last["src_in"] + need))
+                set_t(s["t0"])
+            elif s["t0"] - t >= BURST["min_shot"]:
+                fill_one(s["t0"], "cover: lead-in to a burst")
+            if abs(t - s["t0"]) > 1.0 / 60 and t < s["t0"]:
+                if timeline:   # tiny remainder: let the previous shot run on (a frame or two)
+                    timeline[-1]["t1"] = round(s["t0"], 3)
+                    timeline[-1]["dur"] = round(s["t0"] - timeline[-1]["t0"], 3)
+                set_t(s["t0"])
+        in_burst: set[str] = set()
+        for c in shots:
+            if t + d > vo_dur + 1e-6:
+                break
+            if fo.free_len(c) < d or c["id"] in in_burst:
+                alt = [x for x in pool if x["id"] not in {y["shot"] for y in timeline[-4:]} and fo.free_len(x) >= d
+                       and x["id"] not in s["burst"] and x["id"] not in in_burst]
+                if not alt:
+                    continue
+                c = max(alt, key=lambda x: x["score"])
+            in_burst.add(c["id"])
+            place(c, t + d, s.get("why", "burst"), burst=True)
+        return bool(in_burst)
+
+    def set_t(v):
+        nonlocal t
+        t = v
 
     def end_for(avail, limit):
         """Where to cut a shot that starts at t, has `avail` seconds, and must end by `limit`."""
@@ -278,7 +272,12 @@ def build_vo_timeline(seq, words, vo_dur, cands, notes, metrics_by_clip, banned=
                 same = 0.1 if prev is not None and c["clip"] == prev["clip"] else 0.0
                 p = pace_at(t)
                 end_on_face = 0.6 * min(c["face"] * 4, 1) if last_slot else 0.0  # finish on a face
-                return (c["score"] + same + 0.15 * min(fo.free_len(c), p) / p + end_on_face
+                n = notes.get(c["id"], {})
+                filler = 0.35 if ("moving, no face (likely walking/filler)" in c["flags"] or n.get("filler")
+                                  or n.get("shot_type") == "walking away / back of head") else 0.0
+                similar = 0.4 if (prev is not None and "hash" in c and "hash" in prev
+                                  and hamming(c["hash"], prev["hash"]) <= 12) else 0.0
+                return (c["score"] + same + 0.15 * min(fo.free_len(c), p) / p + end_on_face - filler - similar
                         - 0.06 * abs(order.get(c["id"], 0) - here))
             c = max(fresh, key=rank)
             place(c, end_for(fo.free_len(c), limit), why)
@@ -291,14 +290,28 @@ def build_vo_timeline(seq, words, vo_dur, cands, notes, metrics_by_clip, banned=
             break
         nxt = seq[k + 1]["t0"] if k + 1 < len(seq) else vo_dur
         nxt = min(max(nxt, t), vo_dur)
+        if s.get("burst"):
+            if place_burst(s):
+                continue
+            s = {**s, "shot": s["burst"][0]}
         c = fo.by_id[s["shot"]]
         avail = fo.free_len(c)
-        if avail < MIN_SHOT or (timeline and timeline[-1]["shot"] == c["id"]):
-            continue
+        later = frozenset(i for x in seq[k + 1:] for i in ([x["shot"]] if x.get("shot") else x.get("burst", [])))
+        later |= {x["shot"] for x in seq[-1:] if x.get("shot")}   # never eat the ending
         if nxt - t < MIN_SHOT and k + 1 < len(seq):
             continue  # slot too small; the next planned shot starts here instead
+        if avail < MIN_SHOT or (timeline and timeline[-1]["shot"] == c["id"]):
+            # the planned shot is used up: cover ITS slot with fresh footage, so everything after it
+            # (above all the ending) still starts exactly where it was planned
+            guard = 0
+            while nxt - t >= MIN_SHOT and guard < 20:
+                guard += 1
+                before = t
+                fill_one(nxt, "cover: the planned shot was used up", later)
+                if t <= before + 1e-6:
+                    break
+            continue
         place(c, end_for(avail, nxt), s.get("why", ""), s.get("offset"))
-        later = frozenset(x["shot"] for x in seq[k + 1:])
         guard = 0
         while nxt - t >= MIN_SHOT and guard < 50:  # shot ran out early: cover the rest of its slot
             guard += 1

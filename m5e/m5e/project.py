@@ -10,7 +10,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import analyze, audio, brain, captions, fcpxml, media, plan, reference, render, style, transcribe
+import numpy as np
+
+from . import (analyze, audio, brain, captions, director, fcpxml, media, metrics, music, plan, reference, render,
+               sfx, style, transcribe)
+from . import profile as profiles
 
 WORK = "m5e_project"
 OUT = "m5e_out"
@@ -35,11 +39,14 @@ class Project:
         self.state.setdefault("must", [])
         self.state.setdefault("notes", {})
         self.ref, self.style_ref, self.notes = {}, "", {}
+        self.sfx, self.music_beats = [], None
+        self.profile = profiles.load(self.cfg.get("profile"))
 
     # ------------------------------------------------------------------ setup
     def _config(self) -> dict:
         p = self.folder / "m5e.json"
-        cfg = {"pace": style.PACE, "whisper": "small", "context": DEFAULT_CONTEXT, "brief": "", "lut": None,
+        cfg = {"pace": style.PACE, "profile": style.PROFILE, "sfx": True, "ambience": True,
+               "whisper": "small", "context": DEFAULT_CONTEXT, "brief": "", "lut": None,
                "grade": style.GRADE, "max_len": 60, "review_passes": 2, "tighten_vo": True, "stabilize": False,
                "vocab": style.VOCAB, "fixes": {}, "name": self.folder.name}
         self._user_cfg = json.loads(p.read_text()) if p.exists() else {}
@@ -136,6 +143,23 @@ class Project:
                 analyze.make_strip(self.clips[c["clip"]], c, strip, metrics=self.metrics[c["clip"]])
         dups = sum("duplicate" in c["flags"] for c in cands)
         self.log(f"  {len(cands)} candidate shots ({dups} near-duplicates set aside)")
+        self.check_log_footage()
+
+    def check_log_footage(self):
+        """Flat, desaturated footage = a log profile (DJI D-Log 2 / D-Log M). Without the LUT it looks grey."""
+        if self.cfg.get("lut"):
+            return
+        looks = []
+        for cid in list(self.clips)[:: max(1, len(self.clips) // 3)][:3]:
+            lk = self.state.setdefault("looks", {}).get(cid) or reference.look(self.clips[cid]["path"], self.clips[cid])
+            self.state["looks"][cid] = lk
+            if lk:
+                looks.append(lk)
+        if looks and np.median([x["saturation"] for x in looks]) < 0.14 and np.median([x["contrast"] for x in looks]) < 0.13:
+            msg = ("The footage looks flat and grey, like a LOG profile (Osmo Pocket D-Log 2 / D-Log M). Download DJI's "
+                   "LUT for it and set \"lut\" in m5e.json, or the reel will look washed out.")
+            self.log("  note: " + msg)
+            self.state.setdefault("warnings", []).append(msg)
 
     def understand(self):
         """AI looks at every candidate shot and logs what's actually in it."""
@@ -155,6 +179,30 @@ class Project:
                     self.state["notes"][c["id"]] = {**notes[c["id"]], "_key": key(c)}
             self.save()
         self.notes = {k: v for k, v in self.state["notes"].items() if any(c["id"] == k for c in self.cands)}
+
+    def rhythm_template(self):
+        """Where the cut rhythm comes from: a reference video if given, else the editing profile."""
+        if self.ref:
+            return self.ref["rhythm"]["shots"]
+        if self.profile and "pace" not in self._user_cfg:
+            return {"curve": self.profile["curve"]}
+        return None
+
+    def pace_hint(self) -> str:
+        if self.ref:
+            r = self.ref["rhythm"]
+            return f"follow the reference video: median {r['median']}s, by thirds {r['by_third']}"
+        if self.profile and "pace" not in self._user_cfg:
+            return (f"the creator's profile curve, median shot length by tenth of the video {self.profile['curve']}; "
+                    f"first shot ~{self.profile['first_shot']}s")
+        return f"average about {self.cfg['pace']}s per shot"
+
+    def first_shot(self) -> float:
+        if self.ref and self.ref["rhythm"].get("first_shot"):
+            return float(min(max(self.ref["rhythm"]["first_shot"], style.MIN_SHOT), 1.5))
+        if self.profile:
+            return float(min(max(self.profile["first_shot"], style.MIN_SHOT), 1.5))
+        return float(self.cfg["pace"])
 
     # ------------------------------------------------------------------ reference
     def study_reference(self):
@@ -193,6 +241,10 @@ class Project:
             raw_dur = media.probe(self.vo)["duration"]
             self.log(f"  voiceover {raw_dur:.1f}s -> {self.vo_dur:.1f}s after tightening pauses; "
                      f"\"{' '.join(w['w'] for w in self.words[:12])}...\"")
+            if self.music:
+                bt = music.track(self.music, max_seconds=self.vo_dur + 5)
+                self.music_beats = bt["beats"]
+                self.log(f"  music: {bt['bpm']} BPM - cuts and bursts will sit on the beat where the words allow")
             return
         self.log("No voiceover file: looking for people talking in the clips...")
         self.clip_words = {}
@@ -225,27 +277,45 @@ class Project:
                          for t in range(int(dur / (pace / 2)))]
                 self.vo_dur = dur
             segs = None
-            if use_ai:
+            ai_sfx = []
+            if use_ai and self.mode == "vo":
                 try:
-                    self.log("AI editor is planning the cut against the voiceover...")
-                    p = brain.plan_vo(words, dur, [c for c in self.cands if "duplicate" not in c["flags"]],
-                                      self.notes, self.clip_order, pace, ban, must, revision_notes, self.cfg["brief"],
-                                      self.style_ref)
-                    segs = plan.vo_plan_to_seq([s.model_dump() for s in p.segments], words)
-                    self.state["ai_notes"] = {"hook": p.hook_note, "vo_feedback": p.vo_feedback}
+                    self.log("AI director is planning the edit: story, cuts, bursts, sound...")
+                    bts, scs, bsc = director.story_context(words, dur, self.cands, self.notes, self.clips)
+                    p = brain.direct_vo(words, dur, bts, scs, bsc,
+                                        [c for c in self.cands if "duplicate" not in c["flags"]], self.notes,
+                                        self.clip_order, profiles.describe(self.profile) if self.profile else "",
+                                        self.pace_hint(), self.music_beats, ban, must, revision_notes,
+                                        self.cfg["brief"], self.style_ref)
+                    segs, ai_sfx = director.from_ai(p, words, dur, self.cands, self.music_beats)
+                    if not segs:
+                        segs = None
+                    self.state["ai_notes"] = {"story": p.story, "hook": p.hook_note, "ending": p.ending_note,
+                                              "vo_feedback": p.vo_feedback}
+                    self.state["story"] = {"beats": bts, "scenes": [{k: v for k, v in sc.items() if k != "shots"}
+                                                                    for sc in scs], "beat_scene": bsc}
                 except brain.BrainError as e:
-                    self.log(f"  AI editor unavailable ({e}); using the rule-based editor.")
+                    self.log(f"  AI director unavailable ({e}); using the rule-based director.")
+            template = self.rhythm_template()
+            pace_at = plan.pace_curve(dur, pace, template)
+            sfx_plan = []
             if segs is None:
-                template = self.ref["rhythm"]["shots"] if self.ref else None
-                segs = plan.heuristic_vo(words, dur, self.cands, self.notes, self.metrics, self.clip_order, pace, ban,
-                                         must, template)
+                d = director.direct(words, dur, self.cands, self.notes, self.metrics, self.clips, self.clip_order,
+                                    pace_at, self.first_shot(), ban, must, self.music_beats)
+                segs, sfx_plan = d["seq"], d["sfx"]
+                self.state["story"] = {"beats": d["beats"], "scenes": [{k: v for k, v in sc.items() if k != "shots"}
+                                                                         for sc in d["scenes"]],
+                                       "beat_scene": d["beat_scene"]}
+            else:
+                sfx_plan = ai_sfx
             self.timeline, warns = plan.build_vo_timeline(segs, words, dur, self.cands, self.notes, self.metrics,
-                                                          ban, pace, self.ref["rhythm"]["shots"] if self.ref else None)
+                                                          ban, pace, template)
             for w in warns:
                 self.log(f"  note: {w}")
             self.state["warnings"] = warns
             self.cap_words = self.words if self.mode == "vo" else []
         else:
+            sfx_plan = []
             utts = plan.utterances(self.clip_words)
             segs = None
             if use_ai:
@@ -267,8 +337,15 @@ class Project:
             self.vo_dur = self.timeline[-1]["t1"]
         plan.fill_face_positions(self.timeline, self.metrics, self.cands)
         self.timeline = render.frame_round(self.timeline)
+        self.sfx = director.snap_sfx(sfx_plan, self.timeline) if self.mode in ("vo", "montage") and self.cfg["sfx"] else []
         self.state["timeline"] = self.timeline
         self.state["cap_words"] = self.cap_words
+        self.state["sfx"] = self.sfx
+        self.quality = metrics.measure(self.timeline, self.cap_words if self.mode == "vo" else [], self.cands,
+                                       self.notes, self.clip_order, self.profile if self.mode == "vo" else None,
+                                       self.music_beats, self.sfx)
+        self.state["quality"] = self.quality
+        self.log("  " + metrics.as_text(self.quality).replace("\n", "\n  "))
         self.save()
         self.log(f"  {len(self.timeline)} shots, {self.timeline[-1]['t1']:.1f}s, "
                  f"average {self.timeline[-1]['t1'] / max(len(self.timeline), 1):.2f}s per shot")
@@ -313,8 +390,16 @@ class Project:
             render.talk_audio(self.timeline, self.clips, self.work) if self.mode == "talk" else None)
         name = final_name or self.cfg["name"]
         out = self.out / f"{name}.mp4"
+        self.log("Mixing sound (voice, ambience, music, sound effects)...")
+        amb = render.ambience_track(self.timeline, self.clips, self.work) \
+            if self.mode == "vo" and self.cfg.get("ambience", True) else None
+        sfx_track = None
+        if self.sfx:
+            sfx_track = sfx.build_track(self.sfx, total, 0.7, [self.folder / "sfx", Path.home() / ".m5e" / "sfx"],
+                                        self.work / "sfx.wav")
+        mixed = render.mix_audio(self.work, total, voice, self.mode == "vo", amb, self.music, sfx_track)
         self.log("Final encode (captions burned in)...")
-        render.final(video, ass, voice, out, total, self.music, voice_is_vo=self.mode == "vo")
+        render.final(video, ass, None, out, total, mixed=mixed)
         fcpxml.export(self.timeline, self.clips, self.out / f"{name}.fcpxml", name,
                       (Path(self.vo_tight), self.vo_dur) if self.mode == "vo" else None)
         self.save()
@@ -328,8 +413,10 @@ class Project:
             t0, t1 = s["f0"] / style.FPS, (s["f0"] + s["frames"]) / style.FPS
             said = " ".join(w["w"] for w in self.cap_words if t0 - 0.05 <= w["s"] < t1 - 0.05)
             n = self.notes.get(s.get("shot") or "", {})
+            fx = [x["type"] for x in self.sfx if abs(x["t"] - t0) < 0.02]
             rows.append(f"{i}: {t0:5.2f}-{t1:5.2f}s ({t1 - t0:.2f}s) shot {s.get('shot')} [{n.get('what', '')}] "
-                        f"| said: \"{said}\"")
+                        f"| said: \"{said}\"{' | burst' if s.get('burst_part') else ''}"
+                        f"{' | sound: ' + '+'.join(fx) if fx else ''}")
         return "\n".join(rows)
 
     def review_loop(self, out: Path) -> Path:
@@ -341,7 +428,7 @@ class Project:
             sheets = render.contact_sheets(out, self.work / "review")
             self.log(f"AI reviewer is watching the cut (pass {k + 1}/{passes})...")
             try:
-                rv = brain.review(sheets, self.edl_text(), self.style_ref)
+                rv = brain.review(sheets, self.edl_text(), self.style_ref, metrics.as_text(self.quality))
             except brain.BrainError as e:
                 self.log(f"  review unavailable ({e})")
                 break
@@ -383,12 +470,16 @@ class Project:
         reviews = "".join(f"<li>Pass {i + 1}: {r['score']}/10 - " + "; ".join(html.escape(f"seg {f['segment']}: {f['problem']}")
                           for f in r["fixes"]) + "</li>" for i, r in enumerate(self.state.get("reviews", [])))
         ai = self.state.get("ai_notes", {})
+        q = self.state.get("quality")
+        qhtml = f"<h2>Quality checks</h2><pre>{html.escape(metrics.as_text(q))}</pre>" if q else ""
+        fx = ", ".join(f"{x['type']} @{x['t']:.2f}s" for x in self.state.get("sfx", []))
         doc = f"""<!doctype html><meta charset=utf-8><title>m5e report</title>
 <style>body{{font:14px system-ui;margin:16px;background:#111;color:#eee}}img{{height:90px}}td{{border-top:1px solid #333;
 padding:6px;vertical-align:top}}.c{{display:inline-block;width:330px;margin:4px;vertical-align:top}}</style>
 <h1>{html.escape(self.cfg['name'])}</h1><p>mode: {self.mode} · {len(self.timeline)} shots ·
 {self.timeline[-1]['t1']:.1f}s</p><p>{html.escape(ai.get('hook', ''))}</p><p>{html.escape(ai.get('vo_feedback', ''))}</p>
-<ul>{reviews}</ul><h2>Cut</h2><table>{''.join(rows)}</table><h2>Not used</h2>{''.join(rej)}"""
+<p>{html.escape(ai.get('story', ''))}</p><ul>{reviews}</ul>{qhtml}<p><b>Sound:</b> {html.escape(fx or 'none')}</p>
+<h2>Cut</h2><table>{''.join(rows)}</table><h2>Not used</h2>{''.join(rej)}"""
         p = self.out / "report.html"
         p.write_text(doc, encoding="utf-8")
         return p

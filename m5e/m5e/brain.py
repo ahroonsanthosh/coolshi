@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from .style import HOUSE_RULES, MAX_SHOT, MIN_SHOT
+from .style import BURST, HOUSE_RULES, MAX_SHOT, MIN_SHOT, PLAYBOOK, SFX_RULES
 
 MODEL = os.environ.get("M5E_MODEL", "claude-opus-5-5")
 BATCH = 15  # candidate strips per "look at these shots" request
@@ -98,6 +98,8 @@ class ShotNote(BaseModel):
     framing_ok: bool       # subject well framed for a vertical reel (not cut off, not tilted badly)
     filler: bool           # nothing happening worth showing
     best_part: Literal["start", "middle", "end", "any"]
+    action: bool           # something physically happens (a movement worth cutting on)
+    photo_moment: bool     # someone takes/poses for a photo (a shutter sound fits)
     tags: list[str]        # nouns/actions someone might say in a voiceover: "plane", "kebab", "laptop", "laughing"
 
 
@@ -150,6 +152,35 @@ class VOPlan(BaseModel):
     segments: list[VOSeg]
     hook_note: str      # how the first second grabs attention
     vo_feedback: str    # honest note on the voiceover itself (hook strength, flat ending) — the editor can't fix the script
+
+
+class DirCut(BaseModel):
+    from_word: int     # the voiceover word this shot starts on (the picture lands with it)
+    shot: str
+    offset: float      # seconds into the shot where it begins (pick its strongest moment)
+    why: str
+
+
+class DirBurst(BaseModel):
+    from_word: int     # where the burst starts
+    shots: list[str]   # 3-4 DIFFERENT shots, ~0.3s each
+    why: str
+
+
+class DirSfx(BaseModel):
+    at_word: int       # the cut on this word (riser: the reveal word it builds into)
+    type: Literal["click", "pop", "whoosh", "riser", "hit", "shutter"]
+    why: str
+
+
+class DirectorPlan(BaseModel):
+    story: str          # 2-3 sentences: the arc you're building (hook -> ... -> payoff)
+    cuts: list[DirCut]
+    bursts: list[DirBurst]
+    sfx: list[DirSfx]
+    hook_note: str
+    ending_note: str
+    vo_feedback: str    # honest note on the voiceover itself (the editor can't fix the script)
 
 
 class TalkSeg(BaseModel):
@@ -239,6 +270,53 @@ def plan_talk(utterances: list[dict], cands, notes, clip_order, target_len: floa
     return _ask([{"type": "text", "text": text}], TalkPlan, PLAN_SYSTEM, effort="high")
 
 
+DIRECTOR_SYSTEM = f"""You are the editor for @kriosfounders' Instagram Reels: day-in-the-life videos of three teenage
+founders. You cut the way the creator cuts - you have his editing profile, measured from his own reels - but better:
+tighter, cleaner, more intentional. You decide what goes where, how long each cut holds, where a quick-cut burst
+goes and where (sparingly) a sound effect helps. You think like an editor, not a template: the day's order is the
+backbone, but you move a shot when it makes the story stronger (a cold-open hook, a payoff saved for the end).
+
+{PLAYBOOK}
+
+{HOUSE_RULES}
+
+Hard rules for your answer (a validator enforces them; breaking them just loses your intent):
+- cuts: one per shot change, ordered by from_word, the first at word 0. Ordinary shots last {MIN_SHOT}-{MAX_SHOT}s.
+- bursts: at most {2}, each 3-4 DIFFERENT shots (~{BURST['shot']}s each); no burst on or right after a payoff.
+- sfx: click/pop only on burst cuts; at most {SFX_RULES['max_whoosh']} whooshes (real location changes);
+  at most {SFX_RULES['max_riser']} riser(s), each into a genuine reveal, with a hit on that same reveal word;
+  shutter only on a photo moment. Never more than one sound per cut. Leave most cuts silent.
+- A shot's offset + its time on screen must fit in its usable length. Use each moment once.
+- Never use a shot marked banned. Always use the shots marked must-use.
+"""
+
+
+def direct_vo(words, vo_dur, beats, scenes, beat_scene, cands, notes, clip_order, profile_text, pace_hint,
+              music_beats=None, banned=(), must=(), revision_notes: str = "", brief: str = "",
+              style_ref: str = "") -> DirectorPlan:
+    wl = " ".join(f"{i}:{w['w']}@{w['s']:.2f}" for i, w in enumerate(words))
+    bl = "\n".join(f"  beat {k} words {b['i0']}-{b['i1']} ({b['t0']:.1f}-{b['t1']:.1f}s) {b['intent']:10} "
+                    f"[{scenes[beat_scene[k]]['id'] if scenes else '-'}] {b['text']}" for k, b in enumerate(beats))
+    sl = "\n".join(f"  {sc['id']} {sc['label']} - clips {', '.join(sc['clips'])} - shots {', '.join(sc['shots'][:30])}"
+                    for sc in scenes)
+    text = (f"VOICEOVER ({vo_dur:.1f}s), as index:word@start-seconds:\n{wl}\n\n"
+            f"STORY BEATS (my first read; scene in brackets is where the day's order puts it):\n{bl}\n\n"
+            f"SCENES in the order they were filmed:\n{sl}\n\n"
+            f"{profile_text}\nTarget rhythm: {pace_hint}\n\n"
+            f"SHOT LIST (id | shooting order | usable length | measurements | log):\n"
+            f"{_shot_table(cands, notes, clip_order, set(banned), set(must))}\n")
+    if music_beats:
+        text += f"\nMUSIC beats (s): {', '.join(f'{b:.2f}' for b in music_beats[:160])}\n"
+    if brief:
+        text += f"\nBRIEF FROM THE CREATOR: {brief}\n"
+    if style_ref:
+        text += f"\n{style_ref}\n"
+    if revision_notes:
+        text += f"\nREVIEW OF YOUR PREVIOUS CUT - fix every point:\n{revision_notes}\n"
+    text += "\nReturn the full edit: story, cuts, bursts, sfx, and notes."
+    return _ask([{"type": "text", "text": text}], DirectorPlan, DIRECTOR_SYSTEM, effort="high", max_tokens=32000)
+
+
 # --------------------------------------------------------------------------------------------
 # 3. Watch the render and critique it
 # --------------------------------------------------------------------------------------------
@@ -257,12 +335,16 @@ class Review(BaseModel):
 
 
 REVIEW_SYSTEM = f"""You are the most demanding short-form video editor reviewing a cut before it goes on Instagram
-Reels. You get contact sheets of the rendered reel (frames every half second, timestamps burned in) and the edit
-decision list. Judge it against the best editing on the platform, not against "fine".
+Reels. You get contact sheets of the rendered reel (frames every half second, timestamps burned in), the edit
+decision list (with the sound effects), and objective measurements of the cut. Judge it against the best editing on the platform, not against "fine".
 
 Check, in this order: the first second (would you stop scrolling?), focus and stability of every shot, whether
-each shot matches what's being said at that moment, rhythm and energy, filler, repeated or near-identical shots,
-caption readability (captions are burned in; is anything important hidden behind them?), and the ending.
+each shot matches what's being said at that moment, rhythm and energy (does it open fast and settle, are bursts in
+the right places), filler, repeated or near-identical shots, sound design (purposeful and subtle, never on every
+cut, riser landing on a real reveal), caption readability (captions are burned in; is anything important hidden
+behind them?), and the ending.
+
+{PLAYBOOK}
 
 {HOUSE_RULES}
 
@@ -271,8 +353,10 @@ segment number and says concretely what to change (e.g. "segment 4: replace with
 the VO says 'we landed'")."""
 
 
-def review(sheets: list[Path], edl_text: str, style_ref: str = "") -> Review:
+def review(sheets: list[Path], edl_text: str, style_ref: str = "", metrics_text: str = "") -> Review:
     content: list = [{"type": "text", "text": f"EDIT DECISION LIST:\n{edl_text}"}]
+    if metrics_text:
+        content.append({"type": "text", "text": f"MEASURED (objective checks of this cut):\n{metrics_text}"})
     if style_ref:
         content.append({"type": "text", "text": style_ref + "\nAlso judge how closely the cut follows this reference."})
     for s in sheets:

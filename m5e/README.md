@@ -1,30 +1,50 @@
 # m5e (montage)
 
-Drop a folder of clips and a voiceover in, get a finished vertical reel out, cut in the
-@kriosfounders style with London-style captions, at the highest quality Instagram will take.
+Drop a folder of clips and a voiceover in, get a finished vertical reel out. m5e cuts the way the
+@kriosfounders reels are cut, measured from the account's own reels, and then tightens it. It uses
+London-style captions and renders at the highest quality Instagram will take.
 
-m5e:
+## What it does, in order
 
-1. **Checks every clip like an assistant editor.** It measures focus (including focus hunting and
-   motion blur), shake, whip pans, exposure, faces and near-duplicate re-takes, frame by frame.
-   Anything soft, shaky, murky or repeated is set aside, and the report says why.
-2. **Understands the footage** *(needs an Anthropic API key)*. Claude looks at every usable shot,
-   including a full-resolution crop of any face so it can tell whether the camera actually focused
-   on the person, and logs who's in it, what's happening, the energy, and whether it would make a good opener.
-3. **Cuts it like an editor.** The AI editor matches shots to what the voiceover is saying and opens
-   on the strongest image. Cuts land on word onsets and the pace follows the energy of each line. No
-   frame is shown twice and no shot runs too long.
-4. **Watches its own cut and fixes it.** A reviewer pass scores the render against top-tier reels
-   editing (hook, focus, matching, rhythm, filler, ending) and sends back fixes. m5e re-cuts until it
-   passes, up to 2 passes by default.
-5. **Renders at maximum clarity.** Lossless per-shot intermediates, then one near-transparent H.264
-   encode. DJI 3K is downscaled to 1080×1920 with a high-quality scaler, a light sharpen is applied only when
-   downscaling, HDR/HLG is tone-mapped properly, loudness is set to -14 LUFS, and captions are burned in.
-6. **Gives you a DaVinci Resolve timeline** (`.fcpxml`) linked to your original camera files, plus
-   `captions.srt`, so you can fine-tune anything in Resolve.
+1. **Checks every frame like an assistant editor.** It finds focus (including focus hunting and motion blur),
+   shake, whip pans, under-exposure, faces and duplicate re-takes. Anything soft, shaky, murky or repeated is set
+   aside, and the report says why.
+2. **Understands the footage** *(Anthropic API key)*. Claude logs every usable shot: who's in it, what's happening,
+   the energy, whether it would hook, and whether the camera actually focused on the person (it gets a
+   full-resolution face crop for that).
+3. **Works out the story.**
+   - The voiceover is split into **beats** (hook, transition, action, list, payoff).
+   - The footage is grouped into **scenes** by when and where it was filmed.
+   - Each beat is matched to the right part of the day. The day's order is the backbone, but it's flexible:
+     the hook can be a cold open from later, and a beat that names a thing pulls footage of that thing.
+4. **Cuts like an editor.**
+   - **Rhythm:** follows your editing profile (opens fast with a ~0.7s first shot, settles to ~1.6-1.9s,
+     holds the ending), or a reference reel's rhythm if you add one.
+   - **Timing:** cuts land on new thoughts and content words, with the picture 2 frames ahead of the word. With
+     music, cuts and bursts also sit on the beat.
+   - **Bursts:** 3-4 different shots, ~0.3s each, when the story arrives somewhere new. Used sparingly.
+   - **Variety:** shot size and subject change at every cut, and never two near-identical framings back to back.
+   - **Ending:** the closing face/payoff is chosen first and saved, so it's there at the end.
+5. **Sound design, subtle and purposeful.** Every sound measures 6-12 dB under the voice. Hard cuts only, no
+   flashy transitions.
+   - **click/pop** on burst cuts
+   - **whoosh** (peaking on the cut) on real location changes, max 2
+   - **riser** into a genuine reveal, ending on the reveal frame, then a soft **hit**, max 1
+   - **shutter** on photo moments
+   - **ambience**: the clips' own sound, tucked under the voice so it breathes in the pauses
+   - **music**, ducked under the voice
+6. **Watches its own cut and fixes it** *(API key)*. The reviewer looks at the render plus objective checks
+   (rhythm vs. your profile, cuts on words and on the beat, day order, opening and ending, filler, repeats) and
+   sends fixes. m5e re-cuts, up to 2 passes.
+7. **Renders at maximum clarity.**
+   - Lossless per-shot intermediates, then one near-transparent H.264 encode.
+   - High-quality 3K → 1080×1920 downscale, with a light sharpen only when downscaling.
+   - HDR/HLG tone-mapped, log footage via your LUT.
+   - Audio mix at -14 LUFS / -1 dBTP.
+8. **DaVinci Resolve timeline** (`.fcpxml`) linked to your camera originals, plus `captions.srt`.
 
-Without an API key everything still works except step 2 and the reviewer. A rule-based editor
-(focus, faces, chronology) does the cut instead, which is good but can't match shots to words.
+Without an API key, everything runs except the AI steps (2 and 6). A rule-based director makes the same kinds of
+decisions (story, rhythm, bursts, sound) from measurements alone. It just can't *see* what's in the shots.
 
 ## Install (once)
 
@@ -36,7 +56,7 @@ Without an API key everything still works except step 2 and the reviewer. A rule
 pip install -r requirements.txt
 ```
 
-4. **Anthropic API key** (for the AI editor): create one at <https://console.anthropic.com>, then
+4. **Anthropic API key**: create one at <https://console.anthropic.com>, then
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -46,43 +66,60 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ## Use
 
-Put everything for one reel in a folder:
-
 ```
 lisbon-day1/
-  DJI_0001.MP4 ... DJI_0042.MP4    all the footage, in any order (sorted by recording time)
-  vo.m4a                            your DJI Mic voiceover (any file named vo*/voiceover*, or any audio file)
-  music.mp3                         optional: music bed, automatically ducked under the voice
-  reference.mp4                     optional: a reel to copy the editing rhythm/style from
-  m5e.json                          optional settings (see below)
+  DJI_0001.MP4 ... DJI_0142.MP4    all the footage, any order (m5e sorts by recording time)
+  vo.m4a                            the DJI Mic voiceover (vo*/voiceover*, or any audio file)
+  music.mp3                         optional: one track under the voice; cuts sit on its beat
+  reference.mp4                     optional: a reel whose rhythm/style to copy
+  sfx/                              optional: your own click*/pop*/whoosh*/riser*/hit*/shutter*.wav
+  m5e.json                          optional settings
 ```
-
-Then run this from the `m5e` folder:
 
 ```bash
 python -m m5e make ~/Desktop/lisbon-day1
 ```
 
-Or open the review page to see every shot, ban the ones you don't want, force the ones you do,
-write a brief, and re-cut:
+Or open the review page. It shows the reel, every shot and why it was or wasn't used, the story/sound notes and
+the quality checks. You can ban or force shots, write a brief, and re-cut:
 
 ```bash
 python -m m5e ui ~/Desktop/lisbon-day1
 ```
 
-Results land in `lisbon-day1/m5e_out/`:
+Results land in `lisbon-day1/m5e_out/`: the reel (`.mp4`), the Resolve timeline (`.fcpxml`), `captions.srt`
+(fix a word there and run `make` again; your text is used), and `report.html`.
 
-| File | What it is |
-|---|---|
-| `<name>.mp4` | the finished reel, ready to post |
-| `<name>.fcpxml` | the same cut as a DaVinci Resolve timeline (File → Import → Timeline) linked to your originals |
-| `captions.srt` | captions (Resolve: File → Import → Subtitle). **Edit this file and run `make` again to fix a word**: your text is used |
-| `report.html` | every shot in the cut and why, plus every shot that wasn't used and why |
+No voiceover? m5e makes a **natural-sound** edit from the lines people say in the clips, with clean moments
+between them. A line said over soft footage plays over clean footage instead (an L-cut).
 
-**No voiceover?** If nobody recorded a VO, m5e makes a *natural-sound* edit. It uses the spoken
-lines from the clips themselves (jump-cutting the pauses), with clean moments between them that
-keep their own sound. If a line was said while the camera was soft or shaky, the sound plays over
-clean footage instead (an L-cut).
+## Osmo Pocket 4P
+
+- **Shoot vertical 3K (1728×3072)**. It's native on the Pocket 4P, so nothing is cropped, and m5e downsamples it to
+  1080×1920 with a little sharpening. 4K landscape works too; the vertical crop follows faces.
+- **D-Log 2** looks grey until it's converted. Download DJI's D-Log 2 → Rec.709 `.cube` LUT and set `"lut"` in
+  `m5e.json`. m5e warns you if footage looks like log and no LUT is set. HLG/HDR is tone-mapped automatically.
+- 60fps is fine (output is 30fps, like the account's reels). Use the tele lens for detail cutaways; the AI
+  director loves them for "show what's said" moments.
+
+## Edit like you (editing profile)
+
+The shipped profile, `m5e/profiles/krios.json`, was measured from 11 @kriosfounders voiceover reels, weighted by
+likes:
+
+- median shot 1.15s
+- first shot ~0.77s
+- shot length by tenth of the reel: 0.7 → 1.2 → 1.6 → ~1.7 … → 2.7s held ending
+- about one burst every other reel
+- music ~6.5 dB under the voice
+
+As you post more, re-learn it from your exports:
+
+```bash
+python -m m5e learn ~/Desktop/my-best-reels --name mine
+```
+
+Then set `"profile": "mine"` in `m5e.json`. It works on any creator's reels whose editing you want to match.
 
 ## Settings (`m5e.json`)
 
@@ -91,38 +128,44 @@ clean footage instead (an L-cut).
 | Key | Default | |
 |---|---|---|
 | `name` | folder name | output file name |
-| `brief` | `""` | instructions for the AI editor, e.g. "open on the pitch result, end on the group photo" |
-| `context` | Krios founders | who's in the footage, so the AI can name people/places |
-| `pace` | `1.4` | average shot length in seconds (London reels: 1.2, NYC: 1.8) |
-| `lut` | none | **DJI D-Log M**: path to DJI's free "D-Log M to Rec.709" `.cube` LUT |
+| `brief` | `""` | instructions for the AI director, e.g. "open on the pitch result, end on the group photo" |
+| `context` | Krios founders | who's in the footage, so the AI can name people and places |
+| `profile` | `krios` | editing profile (rhythm, opening, ending, bursts) |
+| `pace` | profile | force a flat average shot length instead of the profile's rhythm |
+| `lut` | none | path to a `.cube` LUT (DJI D-Log 2 / D-Log M) |
+| `sfx` | `true` | sound effects on/off |
+| `ambience` | `true` | the clips' own sound under the voiceover |
 | `reference` | a file named `ref*` | reel to copy the rhythm/style from |
 | `review_passes` | `2` | how many times the AI reviewer may send the cut back |
 | `tighten_vo` | `true` | shorten long pauses in the voiceover |
-| `stabilize` | `false` | extra stabilisation pass (not needed for gimbal footage) |
 | `whisper` | `small` | speech-to-text model (`medium` is more accurate, slower) |
-| `fixes` | `{}` | spelling fixes for captions, e.g. `{"\\bCreos\\b": "Krios"}` |
-| `max_len` | `60` | longest reel in natural-sound mode, in seconds |
+| `fixes` | `{}` | caption spelling fixes, e.g. `{"\\bCreos\\b": "Krios"}` |
+| `max_len` | `60` | longest reel in natural-sound mode, seconds |
 
 ## For the sharpest result on Instagram
 
-- Shoot DJI at 3K or 4K. m5e downsamples it properly to 1080×1920. Use the D-Log M LUT if you shoot in D-Log M.
-- In Instagram: **Settings → Data usage and media quality → Upload at highest quality: ON.**
-- Upload over Wi-Fi, and don't add text, stickers or filters in Instagram's editor. That triggers another re-encode.
+- In Instagram, turn on **Settings → Data usage and media quality → Upload at highest quality**.
+- Upload over Wi-Fi.
+- Don't add text, stickers or filters in Instagram's editor; that triggers another re-encode.
 
 ## The caption style
 
-Measured from the London reels (28 Sep / 2 Oct 2026): Poppins Bold, white, size 138 at
-1080×1920, tracking -3.5, top of the first line 1475px down, 98px between lines, wrap at 800px,
-at most 3 lines, and a soft shadow. Words appear as they're spoken; a block ends at each sentence or clause.
-Everything lives in `m5e/style.py` if you ever want to change it.
+Measured from the London reels:
 
-## How the AI part works, and what it costs
+- Poppins Bold, white
+- size 138 at 1080×1920, tracking -3.5
+- first line starts 1475px down, 98px between lines, wraps at 800px, at most 3 lines
+- soft shadow
+- words appear as they're spoken; a block ends at each sentence or clause
 
-m5e calls Claude (`claude-opus-5-5` by default; set `M5E_MODEL` to change it) to describe the
-shots, plan the cut, and review the render. Server-side refusal fallbacks are switched on, so a
-declined request is retried on Anthropic's recommended fallback model instead of failing the edit.
-A typical 40s reel from ~60 candidate shots is very roughly 100-150k input tokens across all calls.
-That's an estimate, not a measurement, so check your usage in the Anthropic console.
+All of it lives in `m5e/style.py`.
+
+## The AI part, and cost
+
+m5e uses Claude (`claude-opus-5-5` by default; set `M5E_MODEL` to change it) to log shots, direct the edit and
+review the render. Server-side refusal fallbacks are on, so a declined request is retried on Anthropic's
+recommended fallback model instead of failing. As a rough estimate (not a measurement), a 40s reel from ~60
+candidate shots is 100-150k input tokens across all calls. Check your usage in the Anthropic console.
 
 ## Tests
 
@@ -132,6 +175,7 @@ python -m unittest discover -s tests
 
 ## Credits
 
-- Poppins font: SIL Open Font License (`m5e/fonts/OFL.txt`).
+- Poppins: SIL Open Font License (`m5e/fonts/OFL.txt`).
 - YuNet face detector: OpenCV Zoo, MIT License (`m5e/models/`).
-- Speech-to-text: faster-whisper (runs locally; your audio never leaves your machine).
+- Speech-to-text: faster-whisper (local; audio never leaves your machine).
+- All sound effects are synthesised by m5e itself (no sample packs).
