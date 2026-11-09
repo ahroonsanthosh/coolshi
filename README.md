@@ -34,7 +34,15 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 
 ![The Index: live data printed as posters on cloth](docs/index.jpg)
 
-**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination; airports by code, name or city; earthquakes by place.
+**News** (`H`). Headlines from fifteen open RSS feeds about flying (Aviation Week, Simple Flying, AeroTime, AirLive, Aviation24), shipping (gCaptain, Splash247, The Maritime Executive, MarineLink, The Loadstar, Hellenic Shipping News) and the world (BBC, Al Jazeera, The Guardian, DW), filterable by topic or by what is on screen. A story is pinned to the map by the first city or country its headline names (a city beats a country, airline names like "Air Canada" don't count, everyday words like "Nice" are skipped); stories it can't place are listed but not pinned. Click a pin for every story there plus what is flying nearby right now. The details sheets pick up stories too: an aircraft's sheet shows headlines naming its airline or registration, a ship's its name or destination port, an airport's its city. Crashes, collisions and sinkings in aviation and shipping news raise an alert.
+
+**Near me** (`O`). Everything within 25, 60 or 150 km of you (or of the map centre), nearest first, with where to look: compass direction and the angle above the horizon, allowing for the Earth's curve. Your location is rounded to about a kilometre and never leaves the device.
+
+**Spacecraft and launches** (`S`). The space stations, the crew and cargo ships docked to them and about 160 satellites bright enough to see, from CelesTrak's orbital elements, propagated in the browser with SGP4 every second. Select one for its ground track, altitude, speed, period, inclination, perigee and apogee, and whether it is sunlit. Upcoming launches worldwide (Launch Library 2) sit on their pads with a countdown; crewed launches are red.
+
+**Log** (`K`). The unusual things in the sky right now: emergencies, spacecraft, the next launches, drones (ADS-B category UAV, or a drone type such as Reaper, Global Hawk or Triton) and military aircraft by type. First sightings of each are written to a log kept on this device. Tanks and other ground vehicles carry no public transponder, so no open source can show them.
+
+**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination; airports by code, name or city; earthquakes by place; spacecraft by name or NORAD number; launches; and news headlines.
 
 **Alerts** appear when an aircraft squawks 7500, 7600 or 7700 (once a second report confirms it) or a magnitude 5.5+ earthquake strikes.
 
@@ -45,6 +53,8 @@ This is where most of the work went.
 - **Tracks never jump backwards.** The aggregator merges every feed by ICAO address or MMSI and only moves a track when a report's position time is newer than the one it holds, so a slow worldwide poll can't drag a plane back to where it was a minute ago.
 - **Dead reckoning along great circles**, at reported ground speed and track, for as long as the feed's report interval justifies: 45 s for a local receiver feed that reports every few seconds, a little more than the polling interval for the worldwide feed. When the next report lands, the gap is closed over a second instead of snapping. Tracks fade once overdue and the details sheet says how far ahead of its last report a symbol is drawn.
 - **Routes are verified before they are shown.** Route databases map a callsign to the route it usually flies and are often wrong. The aircraft has to be inside a corridor around the great circle between the two airports (widening with route length, since long flights ride or dodge jet streams) and not heading away from the destination. If it isn't, the sheet says which route was on file and why it was rejected.
+- **More aircraft, free.** Besides area and type queries, the server asks adsb.lol and airplanes.live for their worldwide LADD and privacy-address lists (mostly business jets other networks hide) and for large military drone types by name. Point `READSB_URLS` at your own receiver's `aircraft.json` and everything your antenna hears appears every two seconds.
+- **More ships, free.** Open Waters is swept at 75 requests a minute (its limit is 120), busy seas every two minutes, and the map shows up to 15,000 ships in view. `AIS_TCP_FEEDS` adds any raw NMEA AIS stream, such as your own AIS-catcher.
 - **Real types for every aircraft.** OpenSky doesn't send aircraft types, so the server loads the tar1090 airframe database (620,000 entries: registration, type, model, operator, military flag) and fills them in.
 - **Headlines are checked.** The Index only names the highest or fastest aircraft when its type is known and its numbers are plausible (barometric and GNSS altitude agree, no multilaterated speed).
 - **Bad data is filtered**: ground vehicles and tower beacons, positions older than a minute, garbled jumps faster than Mach 3, AIS "not available" values (speed 102.3, course 360, heading 511, rate of turn −128).

@@ -12,11 +12,13 @@ const HELI_TYPE = /^(EC\d\d|H\d{2,3}|AS\d\d|AS3[25]|A1[0-9]{2}|AW\d{3}|B06|B06T|
 const FIGHTER = /^(F1[4-8]|F18[EFS]?|F22|F35|F5|F4|EUFI|RFAL|M200|M2000|MIR2|GRIF|TOR|HAWK|T38|T45|T6|PC21|SU2[4-7]|SU3[0-5]|SU57|MG29|MG31|J10|J11|J20|JF17|A10|AV8B|L39|M346|K8|TEX2|TUCA)$/;
 const LIGHT = /^(C1[0-9]{2}|C17[0-9]|C18[0-9]|C20[0-9]|C21[0-9]|C82[RT]?|P28[A-Z0-9]|PA\d{2}|PA[0-9]{2}T|SR2[02]|DA4[02]|DA62|DA20|BE[0-9]{2}|BE3[56]|M20P|M20T|TB[0-9]{2}|RV\d+|AA5|C77R|PC12|TBM[789]|P46T|EPIC|KODI|DHC2|DHC3|DHC6|C208|BN2P|AT[0-9]{2}|ULAC|G115|SIRA|EV97|CRUZ|AC11|PIVI|S22T|P32R|GLID)$/;
 
+const DRONE = /^(Q1|Q4|Q9|Q25|MQ9|RQ4|HRON|H450|H900|TB2|AKNC|WK45|SCAN|S100)$/;
+
 export function classify(type: string, cat: string, desc = ''): AcClass {
   const t = type.toUpperCase();
   if (cat === 'B1' || /GLID|GLIDER/.test(t + desc.toUpperCase())) return 'glider';
   if (cat === 'B2') return 'balloon';
-  if (cat === 'B6') return 'drone';
+  if (cat === 'B6' || DRONE.test(t) || /\b(UAV|UAS|UNMANNED|DRONE|REAPER|GLOBAL HAWK|TRITON|PREDATOR)\b/i.test(desc)) return 'drone';
   if (cat === 'A7' || HELI_TYPE.test(t) || /HELICOPTER/i.test(desc)) return 'heli';
   if (FIGHTER.test(t) || cat === 'A6') return 'fighter';
   if (cat === 'A5' || HEAVY.test(t)) return 'heavy';

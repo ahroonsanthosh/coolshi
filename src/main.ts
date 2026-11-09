@@ -5,6 +5,7 @@ import { createMap, flyTo, getMap } from './map/mapView.ts';
 import { initPanel } from './ui/panel.ts';
 import {
   initAlerts, initCaption, initClock, initIntro, initKeys, initLayers, initStatus, openAbout, closeAbout, openSearch, toggleLayersPanel,
+  initNews, initNearby, initLog, toggleNews, toggleNearby, toggleLog,
 } from './ui/chrome.ts';
 import type { Gallery } from './gallery/gallery.ts';
 
@@ -17,6 +18,9 @@ initStatus();
 initPanel();
 initLayers();
 initAlerts();
+initNews();
+initNearby();
+initLog();
 
 // The Index pulls in three.js, so it loads the first time it is opened.
 let gallery: Gallery | null = null;
@@ -49,6 +53,9 @@ document.querySelector('.top')!.addEventListener('click', (e) => {
   const act = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
   if (act === 'search') openSearch();
   if (act === 'layers') toggleLayersPanel();
+  if (act === 'news') toggleNews();
+  if (act === 'nearby') toggleNearby();
+  if (act === 'log') toggleLog();
   if (act === 'index') toggleIndex();
   if (act === 'about') (document.getElementById('about')!.hidden ? openAbout() : closeAbout());
   if (act === 'home') home();

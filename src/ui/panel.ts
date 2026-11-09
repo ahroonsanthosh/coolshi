@@ -1,8 +1,10 @@
 // The details sheet. Every number on it says where it came from and how old
 // it is; anything we can't verify is left out rather than guessed.
 
-import { A, AF, S, SRC_NAMES, type HistoryPoint, type Quake, type Disaster } from '../../shared/protocol.ts';
+import { A, AF, S, SRC_NAMES, type HistoryPoint, type Quake, type Disaster, type NewsItem } from '../../shared/protocol.ts';
 import { distance } from '../../shared/geo.ts';
+import { news } from '../state/news.ts';
+import { space, countdown, SAT_KIND_LABEL } from '../state/space.ts';
 import { sunElevation } from '../../shared/sun.ts';
 import { picture, reportAge, type Aircraft, type Ship } from '../state/data.ts';
 import { app } from '../state/app.ts';
@@ -27,6 +29,11 @@ export function initPanel() {
     if (b) b.setAttribute('aria-pressed', String(app.follow));
   });
   onHistory(() => drawProfile());
+  news.on(() => {
+    redrawNews();
+    // A news sheet re-renders whole: its list is the content.
+    if (app.selection?.kind === 'news' && !el.matches(':hover')) render();
+  });
   el.addEventListener('click', (e) => {
     const t = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
     if (!t) return;
@@ -41,6 +48,7 @@ export function initPanel() {
       const lon = Number(t.dataset.lon), lat = Number(t.dataset.lat);
       flyTo(lon, lat, Number(t.dataset.z) || undefined);
     }
+    if (act === 'airport') app.select({ kind: 'airport', id: t.dataset.id! });
     if (act === 'copy') {
       navigator.clipboard?.writeText(location.href).then(() => { t.textContent = 'Link copied'; }).catch(() => {});
     }
@@ -61,6 +69,7 @@ function close() {
 
 function render() {
   clearInterval(tick);
+  redrawNews = () => {};
   currentRoute = null;
   setRoute(null);
   const s = app.selection;
@@ -84,7 +93,95 @@ function render() {
     renderAirport(s.id);
   } else if (s.kind === 'iss') {
     renderIss();
+  } else if (s.kind === 'news') {
+    renderNews(s.id);
+  } else if (s.kind === 'sat') {
+    const sat = space.get(s.id);
+    if (sat) renderSat(s.id); else close();
+  } else if (s.kind === 'launch') {
+    const l = space.launches.find((x) => x.id === s.id);
+    if (l) renderLaunch(s.id); else close();
   }
+}
+
+// ---------------------------------------------------------------------------
+// News, wherever it touches what is selected
+
+/** A list of stories, newest first, each linking out to the publisher. */
+export function storyList(items: NewsItem[], max = 6): string {
+  return items.slice(0, max).map((i) => `
+    <a class="story${i.severe ? ' severe' : ''}" href="${F.esc(i.link)}" target="_blank" rel="noopener">
+      <span class="meta"><span class="tp tp-${i.topic}"></span>${F.esc(i.source)} · ${F.ago((Date.now() - i.time) / 1000)}</span>
+      <span class="hl">${F.esc(i.title)}</span>
+      ${i.summary ? `<span class="sm">${F.esc(i.summary)}</span>` : ''}
+    </a>`).join('');
+}
+
+/** "In the news" block for a details sheet, redrawn when headlines change. */
+let redrawNews = () => {};
+function newsBlock(id: string, find: () => NewsItem[], label = 'In the news') {
+  redrawNews = () => {
+    const box = el.querySelector<HTMLElement>('#news-rel');
+    if (!box || renderedFor !== id) return;
+    const items = find();
+    const html = items.length
+      ? `<div class="deck-h"><span>${F.esc(label)}</span><span>${items.length} ${items.length === 1 ? 'story' : 'stories'}, 48 h</span></div><div class="stories">${storyList(items, 5)}</div>`
+      : '';
+    if (box.dataset.sig !== html) { box.innerHTML = html; box.dataset.sig = html; }
+  };
+  redrawNews();
+}
+
+function renderNews(place: string) {
+  const items = news.at(place);
+  const p = items[0]?.place;
+  if (!p) return close();
+  const near = () => {
+    let air = 0, low = 0;
+    for (const a of picture.aircraft.values()) {
+      if (distance(p.lat, p.lon, a.y, a.x) > 150_000) continue;
+      air++;
+      if (!(a.row[A.flags] & AF.ground) && (a.row[A.alt] ?? 99999) < 10000) low++;
+    }
+    let ap: (typeof AIRPORTS)[number] | null = null, apD = Infinity;
+    for (const x of AIRPORTS) {
+      if (x[8] > 2 || !x[1]) continue;
+      const d = distance(p.lat, p.lon, x[5], x[6]);
+      if (d < apD) { apD = d; ap = x; }
+    }
+    return { air, low, ap, apD };
+  };
+  const n = near();
+  const sun = sunElevation(Date.now(), p.lat, p.lon);
+  const local = localTime(p.lon);
+  open(`
+    ${head(`News · ${p.kind === 'country' ? 'country' : 'place'}`)}
+    <div class="p-title" style="padding-top:22px">
+      <h2>${F.esc(place)}</h2>
+      <div class="sub">${items.length} ${items.length === 1 ? 'story' : 'stories'} in the last two days</div>
+      <div class="sub2">${p.kind === 'country' ? 'Pinned at the country’s main airport' : F.latLon(p.lat, p.lon)}</div>
+      ${items.some((i) => i.severe) ? '<span class="chip red">Incident reported</span>' : ''}
+    </div>
+    <div class="stories" style="margin-top:14px">${storyList(items, 12)}</div>
+    <div class="deck-h"><span>There right now</span><span>live</span></div>
+    <div class="grid deck">
+      ${cell('Aircraft', F.n0(n.air), 'within 150 km')}
+      ${cell('Below 10,000 ft', F.n0(n.low), 'arriving and departing')}
+      ${cell('Main airport', n.ap ? F.esc(n.ap[1] || n.ap[0]) : '—', n.ap ? `${F.esc(n.ap[3] || n.ap[2])} · ${F.km(n.apD)}` : '')}
+      ${cell('Local time', local, sun > 0 ? 'daylight' : sun > -6 ? 'twilight' : 'night')}
+    </div>
+    <div class="actions">
+      <button class="btn" data-act="fly" data-lon="${p.lon}" data-lat="${p.lat}" data-z="${p.kind === 'country' ? 5 : 8}">Zoom in</button>
+      ${n.ap ? `<button class="btn" data-act="airport" data-id="${n.ap[0]}">Airport ${F.esc(n.ap[1] || n.ap[0])}</button>` : ''}
+    </div>
+    <div class="prov">Headlines from open RSS feeds, placed on the map by the first city or country they name. A story can mention a place without being about it; follow the link for the whole report.</div>
+  `);
+}
+
+/** Solar-mean local time from longitude: honest about not knowing zones. */
+function localTime(lon: number): string {
+  const ms = Date.now() + (lon / 15) * 3600_000;
+  return `≈ ${F.utc(ms)}`;
 }
 
 const head = (label: string) =>
@@ -147,6 +244,7 @@ function renderAircraft(a: Aircraft) {
     </div>
     <div id="deck"></div>
     <div class="profile" id="profile"></div>
+    <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
       <a class="btn" href="https://globe.adsb.fi/?icao=${hex}" target="_blank" rel="noopener">adsb.fi ↗</a>
@@ -165,6 +263,18 @@ function renderAircraft(a: Aircraft) {
   loadDeck(a);
   drawProfile();
   enrichAircraft(a);
+  newsBlock(`air:${a.id}`, () => news.mentioning(acNewsTerms(a), ['air', 'world']));
+}
+
+/** Names worth searching headlines for: operator, airline, registration. */
+const acTerms = new Map<string, string[]>();
+function acNewsTerms(a: Aircraft): string[] {
+  const r = a.row;
+  const t = new Set<string>([r[A.reg], ...(acTerms.get(a.id) ?? [])].filter(Boolean));
+  // Owner strings are legal names ("United Airlines Inc"); trim the suffixes.
+  const owner = r[A.owner].replace(/\b(inc|ltd|llc|plc|corp|co|s\.?a\.?|ag|gmbh|limited|company|trustee|bank of utah)\b\.?/gi, '').replace(/[,.]+$/, '').trim();
+  if (owner.split(' ').length <= 4) t.add(owner);
+  return [...t];
 }
 
 function updateAircraft() {
@@ -309,6 +419,10 @@ async function enrichAircraft(a: Aircraft) {
     if (!still()) return;
     const sub2 = el.querySelector('#ac-sub2');
     const operator = rt?.airline || al;
+    if (operator) {
+      acTerms.set(id, [operator]);
+      redrawNews();
+    }
     if (sub2 && operator && !sub2.textContent!.includes(operator)) {
       sub2.textContent = [operator, sub2.textContent].filter(Boolean).join(' · ');
     }
@@ -424,6 +538,7 @@ function renderShip(s: Ship) {
     </div>
     <div id="owd"></div>
     <div id="wd"></div>
+    <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
       ${r[S.imo] ? `<a class="btn" href="https://www.marinetraffic.com/en/ais/details/ships/imo:${r[S.imo]}" target="_blank" rel="noopener">MarineTraffic ↗</a>` : ''}
@@ -445,6 +560,15 @@ function renderShip(s: Ship) {
   upd();
   tick = window.setInterval(upd, 1000);
   const id = s.id;
+  // A ship's name in a headline (long, distinctive names only), or stories
+  // about the port it is bound for.
+  newsBlock(`sea:${id}`, () => {
+    const nm = r[S.name].trim();
+    const byName = nm.length >= 6 && !/^\d+$/.test(nm) ? news.mentioning([nm], ['sea', 'world']) : [];
+    const port = r[S.dest].replace(/[^A-Za-z ]+/g, ' ').trim();
+    const byPort = port.length >= 5 ? news.mentioning([port], ['sea']) : [];
+    return [...new Map([...byName, ...byPort].map((i) => [i.id, i])).values()];
+  });
   fetch(`/api/detail/sea/${r[S.mmsi]}`).then((x) => x.json()).then((d: any) => {
     if (!d || app.selection?.id !== id) return;
     const p = d.particulars ?? {};
@@ -561,6 +685,7 @@ function renderAirport(icao: string) {
       ${cell('Sun', light, `${sun.toFixed(1)}° elevation`)}
     </div>
     <div id="metar"></div>
+    <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="fly" data-lon="${lon}" data-lat="${lat}" data-z="11">Zoom to field</button>
       <a class="btn" href="https://aviationweather.gov/data/metar/?ids=${code}&decoded=1" target="_blank" rel="noopener">Weather ↗</a>
@@ -568,6 +693,11 @@ function renderAirport(icao: string) {
     <div class="prov">Counts are from the aircraft currently on the map, so they depend on receiver coverage near the field. Weather is the latest METAR via NOAA's Aviation Weather Center. Airport data from OurAirports.</div>
   `);
   loadMetar(code);
+  newsBlock(`airport:${icao}`, () => {
+    const named = news.mentioning([name.replace(/\s+(International\s+)?Airport$/i, ''), city].filter(Boolean));
+    const placed = news.near(lat, lon, 60);
+    return [...new Map([...named, ...placed].map((i) => [i.id, i])).values()].sort((a, b) => b.time - a.time);
+  }, `News from ${city || name}`);
 }
 
 // Flight categories as pilots use them, from ceiling and visibility.
@@ -632,4 +762,85 @@ function renderIss() {
   };
   upd();
   tick = window.setInterval(upd, 500);
+}
+
+// ---------------------------------------------------------------------------
+// Spacecraft and launches
+
+function renderSat(id: string) {
+  const s = space.get(id)!;
+  const e = s.rec;
+  // Perigee and apogee from the mean elements (km above a spherical Earth).
+  const a = Math.cbrt(398600.4418 / ((e.no / 60) ** 2));
+  const peri = a * (1 - e.ecco) - 6371, apo = a * (1 + e.ecco) - 6371;
+  const epochAge = (Date.now() - Date.UTC(2000 + (e.epochyr < 57 ? e.epochyr : e.epochyr - 100), 0, 1) - (e.epochdays - 1) * 86400_000) / 1000;
+  open(`
+    ${head(`${SAT_KIND_LABEL[s.kind]} · NORAD ${s.norad}`)}
+    <div class="p-title" style="padding-top:22px">
+      <h2>${F.esc(s.name)}</h2>
+      <div class="sub">${F.esc(SAT_KIND_LABEL[s.kind])}${s.kind === 'crew' ? ' · people aboard' : ''}</div>
+      <div class="sub2">Ground track: 45 minutes behind (solid) and the next orbit (dashed)</div>
+      ${s.kind === 'station' || s.kind === 'crew' ? '<span class="chip blue">Crewed</span>' : ''}
+    </div>
+    <div class="grid">
+      ${cell('Altitude', '', '', '', 'alt')}
+      ${cell('Speed', '', '', '', 'vel')}
+      ${cell('Sunlight', '', '', '', 'sun')}
+      ${cell('Orbit', `${F.n1(s.periodMin)} min`, `${F.n1(1440 / s.periodMin)} orbits a day`)}
+      ${cell('Inclination', `${F.n1(s.incl)}°`, `reaches ${F.n1(s.incl > 90 ? 180 - s.incl : s.incl)}° N and S`)}
+      ${cell('Perigee · apogee', `${F.n0(peri)} · ${F.n0(apo)} km`, `eccentricity ${e.ecco.toFixed(4)}`)}
+      ${cell('Over', '', '', 'wide', 'pos')}
+    </div>
+    <div class="actions">
+      <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
+      <a class="btn" href="https://celestrak.org/NORAD/elements/gp.php?CATNR=${s.norad}&FORMAT=tle" target="_blank" rel="noopener">Elements ↗</a>
+    </div>
+    <div class="prov">Position computed in your browser with SGP4 from CelesTrak's two-line elements, ${F.ago(epochAge).replace(' ago', '')} old. Accuracy is about a kilometre per day of element age; stations that boost their orbit move off it until new elements arrive.</div>
+  `);
+  const upd = () => {
+    const p = space.pos(s);
+    if (!p) return;
+    setCell('alt', `${F.n0(p.alt)} km`, `${F.n0(p.alt / 1.852)} nm`);
+    setCell('vel', `${F.n0(p.vel)} km/h`, `${F.n1(p.vel / 3600)} km/s`);
+    const horizonDip = (Math.acos(6371 / (6371 + p.alt)) * 180) / Math.PI;
+    const el2 = sunElevation(Date.now(), p.lat, p.lon);
+    setCell('sun', el2 > -horizonDip ? 'Sunlit' : 'In Earth’s shadow', `sun ${el2.toFixed(0)}° at the point below`);
+    setCell('pos', F.latLon(p.lat, p.lon), '');
+  };
+  upd();
+  tick = window.setInterval(upd, 1000);
+}
+
+function renderLaunch(id: string) {
+  const l = space.launches.find((x) => x.id === id)!;
+  const [vehicle, payload] = l.name.split('|').map((x) => x.trim());
+  open(`
+    ${head(`Launch · ${F.esc(l.provider || 'provider unknown')}`)}
+    ${l.image ? `<div class="p-photo" id="ph"><img alt="${F.esc(l.rocket)}" referrerpolicy="no-referrer" src="${F.esc(l.image)}"><div class="credit">The Space Devs</div></div>` : ''}
+    <div class="p-title">
+      <h2>${F.esc(payload || l.mission || l.name)}</h2>
+      <div class="sub">${F.esc(l.rocket || vehicle)}</div>
+      <div class="sub2">${F.esc([l.pad, l.location].filter(Boolean).join(', '))}</div>
+      ${l.crewed ? '<span class="chip red">Crewed</span>' : ''}
+      <span class="chip ${l.status === 'Go' ? 'teal' : l.status === 'TBD' || l.status === 'TBC' ? 'amber' : ''}">${F.esc(l.statusName || l.status)}</span>
+      ${l.webcast ? '<span class="chip blue">Webcast live</span>' : ''}
+    </div>
+    <div class="grid">
+      ${cell('Launch', '', '', '', 'cd')}
+      ${cell('Window opens', `${F.utc(l.net)} UTC`, new Date(l.net).toUTCString().slice(0, 16))}
+      ${cell('Mission', F.esc(l.missionType || '—'), '')}
+      ${cell('Orbit', F.esc(l.orbit || '—'), '')}
+    </div>
+    ${l.description ? `<div class="note" style="font-size:13px;color:var(--ink-2)">${F.esc(l.description)}</div>` : ''}
+    <div class="actions">
+      <button class="btn" data-act="fly" data-lon="${l.lon}" data-lat="${l.lat}" data-z="10">Zoom to pad</button>
+      <a class="btn" href="https://ll.thespacedevs.com/2.2.0/launch/${encodeURIComponent(l.id)}/" target="_blank" rel="noopener">Launch Library ↗</a>
+    </div>
+    <div class="prov">From The Space Devs' Launch Library 2, refreshed every half hour. Times slip often; "TBD" and "TBC" mean the date is not yet firm.</div>
+  `);
+  const img = el.querySelector<HTMLImageElement>('#ph img');
+  if (img) { img.onload = () => img.classList.add('loaded'); img.onerror = () => img.closest('.p-photo')?.remove(); }
+  const upd = () => setCell('cd', countdown(l.net).replace(/^in /, 'T− ').replace(/ ago$/, ' ago'), l.net > Date.now() ? 'to the window' : 'since the window opened');
+  upd();
+  tick = window.setInterval(upd, 1000);
 }

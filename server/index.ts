@@ -12,14 +12,16 @@ import { AirStore, SeaStore, type AircraftReport } from './store.ts';
 import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
 import { PROVIDERS, parseReadsb, type Provider } from './feeds/readsb.ts';
-import { Kystverket } from './feeds/kystverket.ts';
+import { Kystverket, ownAisFeeds } from './feeds/kystverket.ts';
 import { OpenWaters, shipDetail } from './feeds/openwaters.ts';
 import { sweepGrid } from './grid.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
+import { Gazetteer, News } from './feeds/news.ts';
+import { Launches, Spacecraft } from './feeds/space.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
-import { AF, SRC, type WorldPayload } from '../shared/protocol.ts';
+import { AF, SRC, type NewsPayload, type SpacePayload, type WorldPayload } from '../shared/protocol.ts';
 import { destination, distance, NM } from '../shared/geo.ts';
 
 const gz = promisify(gzip);
@@ -44,11 +46,15 @@ const opensky = new OpenSky();
 const digitraffic = new Digitraffic();
 const aisstream = new AisStream();
 const kystverket = new Kystverket();
+const ownAis = ownAisFeeds(SRC.local);
 const airportPts = (JSON.parse(readFileSync(join(ROOT, 'src/data/airports.json'), 'utf8')) as any[]).map((a) => [a[5], a[6]] as [number, number]);
 const openwaters = new OpenWaters(airportPts);
 const usgs = new Usgs();
 const gdacs = new Gdacs();
 const iss = new Iss();
+const spacecraft = new Spacecraft();
+const launches = new Launches();
+const news = new News(new Gazetteer(join(ROOT, 'src/data/airports.json')));
 const ingestAir = (r: AircraftReport) => air.ingest(r);
 
 // ---------------------------------------------------------------------------
@@ -78,14 +84,16 @@ const MIL_TYPES = ['C17', 'K35R', 'K35E', 'KC46', 'C30J', 'C130', 'A400', 'C5M',
   // Fast jets, bombers and jet trainers: rarely broadcast, but when one does
   // (ferry flights, airshows, transits with a tanker) these find it.
   'F16', 'F15', 'F18', 'F18S', 'F35', 'F22', 'F5', 'B1', 'B2', 'EUFI', 'RFAL', 'TOR', 'JAS39', 'HAWK', 'M346', 'T38', 'T45', 'TEX2',
-  'A10', 'AJET', 'L39', 'FA50', 'T50', 'PC21', 'K8', 'E7WT', 'E737', 'R135', 'C135', 'KC2'];
-const SEED_TYPES = ['B738', 'A320', 'A20N', 'A21N', 'A321', 'B38M', 'B739', 'A319', 'B789', 'B77W', 'A359', 'B763', 'B788', 'A333', 'E75L', 'CRJ9', 'B737', 'B752', 'DH8D', 'AT76', 'E190', 'A332', 'B772', 'B744', 'B748', 'A388', 'CRJ7', 'E195', 'BCS3', 'B39M'];
+  'A10', 'AJET', 'L39', 'FA50', 'T50', 'PC21', 'K8', 'E7WT', 'E737', 'R135', 'C135', 'KC2',
+  // Large drones: Reapers, Global Hawks and Tritons often broadcast on transit.
+  'Q9', 'Q4', 'Q1', 'Q25', 'HRON'];
+const SEED_TYPES = ['C172', 'PC12', 'C208', 'B350', 'AT72', 'AT75', 'E145', 'CRJ2', 'E170', 'B734', 'B753', 'B78X', 'A35K', 'A339', 'C56X', 'CL35', 'GLF5', 'GLEX', 'B738', 'A320', 'A20N', 'A21N', 'A321', 'B38M', 'B739', 'A319', 'B789', 'B77W', 'A359', 'B763', 'B788', 'A333', 'E75L', 'CRJ9', 'B737', 'B752', 'DH8D', 'AT76', 'E190', 'A332', 'B772', 'B744', 'B748', 'A388', 'CRJ7', 'E195', 'BCS3', 'B39M'];
 let topTypes = [...SEED_TYPES, ...MIL_TYPES];
 setInterval(() => {
   const n = new Map<string, number>();
   for (const r of air.values()) if (r[10] && !(r[14] & 1)) n.set(r[10], (n.get(r[10]) ?? 0) + 1);
   const ranked = [...n.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t).filter((t) => /^[A-Z0-9]{2,4}$/.test(t));
-  topTypes = [...new Set([...ranked.slice(0, 140), ...SEED_TYPES])].slice(0, 150).concat(MIL_TYPES.filter((t) => !ranked.slice(0, 140).includes(t)));
+  topTypes = [...new Set([...ranked.slice(0, 180), ...SEED_TYPES])].slice(0, 190).concat(MIL_TYPES.filter((t) => !ranked.slice(0, 180).includes(t)));
 }, 300_000);
 const lastRun = new Map<string, number>();
 
@@ -122,6 +130,12 @@ function nextJob(lane: Provider, now: number): Job | null {
   for (const s of ['7700', '7600', '7500']) {
     jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000, pri: 0 });
   }
+  // 2b. Worldwide lists in one request: LADD and privacy-address aircraft,
+  // mostly business jets that other networks leave out.
+  PROVIDERS[lane].lists.forEach((u, i) => {
+    const key = `ls${i}:${lane}`;
+    jobs.push({ key, url: () => u, cadence: 90, due: (lastRun.get(key) ?? 0) + 75_000, pri: 0 });
+  });
   // 3. Worldwide by type, on the networks that offer it.
   if (PROVIDERS[lane].type) {
     for (const t of topTypes) {
@@ -195,7 +209,27 @@ startLane('adsblol', 1050, 2.5);
 startLane('airplaneslive', 700, 1.15);
 startLane('adsbone', 900, 1.5);
 kystverket.start((r) => sea.ingest(r));
-every(() => 1.3, async () => {
+for (const f of ownAis) f.start((r) => sea.ingest(r));
+
+// Your own ADS-B receivers: any readsb, dump1090-fa or tar1090 aircraft.json
+// (READSB_URLS="http://pi.local/tar1090/data/aircraft.json,…"), polled every
+// two seconds, so everything your antenna hears appears with full detail.
+const ownAir = (process.env.READSB_URLS ?? '').split(',').map((s) => s.trim()).filter((s) => /^https?:\/\//.test(s))
+  .map((url, i) => ({ url, status: new Status(`readsb${i}`, `Your receiver ${new URL(url).host}`, 'air', 2) }));
+for (const f of ownAir) {
+  every(() => 2, async () => {
+    try {
+      const { data } = await getJson<any>(f.url, {}, 8000);
+      const reports = parseReadsb(data, SRC.local, 2);
+      for (const r of reports) air.ingest(r);
+      f.status.success(reports.length, 'your antenna, every 2 s');
+    } catch (e) {
+      f.status.fail(e);
+      return 15;
+    }
+  });
+}
+every(() => 0.8, async () => {
   if (process.env.OPENWATERS === 'off') return 3600;
   if (!watching()) return 5;
   // Viewers' views first: the 10° boxes their screens overlap, if few.
@@ -219,6 +253,11 @@ aisstream.start((r) => sea.ingest(r));
 every(() => 120, () => usgs.poll());
 every(() => 900, () => gdacs.poll());
 every(() => 300, () => iss.poll());
+// Headlines keep coming whether or not anyone is watching, so the desk is
+// full when someone arrives; each feed is asked every 10 to 20 minutes.
+every(() => 2, () => news.tick());
+every(() => 6 * 3600, () => spacecraft.poll());
+every(() => 1800, () => launches.poll());
 setInterval(() => { air.sweep(); sea.sweep(); }, 5000);
 setInterval(() => {
   for (const [k, v] of views) if (Date.now() - v.seen > 120_000) views.delete(k);
@@ -282,7 +321,7 @@ function sources() {
   for (const r of air.values()) if (r[14] & AF.est) est++;
   estimator.status.count = est;
   estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
-  return [opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, aisstream.status, usgs.status, gdacs.status, iss.status]
+  return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, iss.status, spacecraft.status, launches.status, news.status]
     .map((s) => s.toJSON());
 }
 
@@ -302,7 +341,7 @@ const server = http.createServer(async (req, res) => {
       // The ships in the viewer's box (or the busiest of them), whole each time.
       const b = url.searchParams.get('bbox')?.split(',').map(Number);
       const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
-      const rows = sea.inView(box, box ? 12_000 : 3_000, Number(url.searchParams.get('sel')) || 0);
+      const rows = sea.inView(box, box ? 15_000 : 5_000, Number(url.searchParams.get('sel')) || 0);
       return sendJson(req, res, { now: Date.now(), full: true, rows, removed: [] });
     }
     if (p === '/api/world') {
@@ -317,6 +356,14 @@ const server = http.createServer(async (req, res) => {
     m = p.match(/^\/api\/detail\/sea\/(\d{6,9})$/);
     if (m) return sendJson(req, res, await shipDetail(Number(m[1])));
     if (p === '/api/winds') return sendJson(req, res, windsCached());
+    if (p === '/api/space') {
+      const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };
+      return sendJson(req, res, body);
+    }
+    if (p === '/api/news') {
+      const body: NewsPayload = { now: Date.now(), items: news.items, feeds: [...news.feeds.values()].map((s) => s.toJSON()) };
+      return sendJson(req, res, body);
+    }
     m = p.match(/^\/api\/metar\/([A-Z0-9]{3,4})$/i);
     if (m) return sendJson(req, res, await metar(m[1].toUpperCase()));
     m = p.match(/^\/api\/history\/air\/([0-9a-f~]{6,7})$/i);
