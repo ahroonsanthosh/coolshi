@@ -9,10 +9,10 @@ export const A = {
 /** Bit flags in A.flags */
 export const AF = { ground: 1, mlat: 2, mil: 4, emergency: 8, tisb: 16, ladd: 32, pia: 64, est: 128, approx: 256 } as const;
 /** Source bit flags */
-export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64, adsbone: 128, openwaters: 256 } as const;
+export const SRC = { opensky: 1, adsbfi: 2, adsblol: 4, digitraffic: 8, aisstream: 16, airplaneslive: 32, kystverket: 64, adsbone: 128, openwaters: 256, local: 512 } as const;
 export const SRC_NAMES: Record<number, string> = {
   1: 'OpenSky Network', 2: 'adsb.fi', 4: 'adsb.lol', 8: 'Fintraffic Digitraffic', 16: 'AISStream',
-  32: 'airplanes.live', 64: 'Kystverket (Norway)', 128: 'adsb.one', 256: 'Open Waters AIS',
+  32: 'airplanes.live', 64: 'Kystverket (Norway)', 128: 'adsb.one', 256: 'Open Waters AIS', 512: 'your own receiver',
 };
 
 export type AircraftRow = [
@@ -55,7 +55,7 @@ export interface Disaster {
   lat: number; lon: number; from: number; to: number; severity: string; url: string;
 }
 export interface SourceStatus {
-  id: string; name: string; kind: 'air' | 'sea' | 'event'; ok: boolean; lastOk: number;
+  id: string; name: string; kind: 'air' | 'sea' | 'event' | 'news'; ok: boolean; lastOk: number;
   lastError: string; note: string; count: number; interval: number;
 }
 export interface WorldPayload {
@@ -68,3 +68,29 @@ export interface WorldPayload {
   ships: { total: number; moving: number; largest: { name: string; len: number; type: number; mmsi: number; lat: number; lon: number } | null };
 }
 export interface HistoryPoint { t: number; lat: number; lon: number; alt: number | null; gs: number | null }
+
+export type NewsTopic = 'air' | 'sea' | 'world';
+export interface NewsItem {
+  id: string; topic: NewsTopic; source: string; title: string; link: string;
+  /** Published, ms (or when first heard, if the feed gives no date). */
+  time: number;
+  summary: string; image: string;
+  /** Where the headline says it happened, when a place could be matched. */
+  place: { name: string; lat: number; lon: number; kind: 'city' | 'country' } | null;
+  /** Crash, collision, sinking, emergency and the like. */
+  severe: boolean;
+}
+export interface NewsPayload { now: number; items: NewsItem[]; feeds: SourceStatus[] }
+
+/** A two-line element set, propagated in the browser with SGP4. */
+export interface SatTle {
+  norad: number; name: string; l1: string; l2: string;
+  group: 'station' | 'bright';
+  kind: 'station' | 'crew' | 'cargo' | 'module' | 'telescope' | 'satellite';
+}
+export interface Launch {
+  id: string; name: string; net: number; status: string; statusName: string; provider: string; rocket: string;
+  mission: string; missionType: string; orbit: string; description: string; pad: string; location: string;
+  lat: number; lon: number; image: string; crewed: boolean; webcast: boolean;
+}
+export interface SpacePayload { now: number; sats: SatTle[]; launches: Launch[] }

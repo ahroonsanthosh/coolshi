@@ -42,9 +42,9 @@ export class Status implements SourceStatus {
   count = 0;
   id: string;
   name: string;
-  kind: 'air' | 'sea' | 'event';
+  kind: 'air' | 'sea' | 'event' | 'news';
   interval: number;
-  constructor(id: string, name: string, kind: 'air' | 'sea' | 'event', interval: number) {
+  constructor(id: string, name: string, kind: 'air' | 'sea' | 'event' | 'news', interval: number) {
     this.id = id;
     this.name = name;
     this.kind = kind;

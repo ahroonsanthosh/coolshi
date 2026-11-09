@@ -114,6 +114,7 @@ export const PROVIDERS = {
       `https://opendata.adsb.fi/api/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${Math.round(nm)}`,
     mil: 'https://opendata.adsb.fi/api/v2/mil',
     sqk: (s: string) => `https://opendata.adsb.fi/api/v2/sqk/${s}`,
+    lists: [] as string[],
     type: null as null | ((t: string) => string), // not offered by adsb.fi
   },
   adsblol: {
@@ -121,6 +122,9 @@ export const PROVIDERS = {
       `https://api.adsb.lol/v2/lat/${lat.toFixed(3)}/lon/${lon.toFixed(3)}/dist/${Math.round(nm)}`,
     mil: 'https://api.adsb.lol/v2/mil',
     sqk: (s: string) => `https://api.adsb.lol/v2/sqk/${s}`,
+    // Worldwide in one request each: aircraft on the FAA's LADD list (mostly
+    // business jets, which other networks hide) and on privacy addresses.
+    lists: ['https://api.adsb.lol/v2/ladd', 'https://api.adsb.lol/v2/pia'],
     type: (t: string) => `https://api.adsb.lol/v2/type/${t}`,
   },
   airplaneslive: {
@@ -128,6 +132,7 @@ export const PROVIDERS = {
       `https://api.airplanes.live/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${Math.round(nm)}`,
     mil: 'https://api.airplanes.live/v2/mil',
     sqk: (s: string) => `https://api.airplanes.live/v2/squawk/${s}`,
+    lists: ['https://api.airplanes.live/v2/ladd', 'https://api.airplanes.live/v2/pia'],
     type: (t: string) => `https://api.airplanes.live/v2/type/${t}`,
   },
   adsbone: {
@@ -135,6 +140,7 @@ export const PROVIDERS = {
       `https://api.adsb.one/v2/point/${lat.toFixed(3)}/${lon.toFixed(3)}/${Math.round(nm)}`,
     mil: 'https://api.adsb.one/v2/mil',
     sqk: (s: string) => `https://api.adsb.one/v2/sqk/${s}`,
+    lists: [] as string[],
     type: (t: string) => `https://api.adsb.one/v2/type/${t}`,
   },
 };

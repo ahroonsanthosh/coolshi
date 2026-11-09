@@ -12,7 +12,7 @@ import { SRC } from '../../shared/protocol.ts';
 import { getJson, HttpError, Status } from './http.ts';
 
 const API = 'https://ais.openwaters.io/v1/vessels';
-const GAP_MS = 1300; // ~46 requests a minute, well under the 120 allowed
+const GAP_MS = 800; // 75 requests a minute, comfortably under the 120 allowed
 
 interface Box { s: number; w: number; n: number; e: number; next: number; count: number }
 
@@ -47,7 +47,7 @@ export class OpenWaters {
   private pick(now: number): { s: number; w: number; n: number; e: number; box?: Box } | null {
     for (const f of this.focus) {
       const k = `${f.s},${f.w},${f.n},${f.e}`;
-      if ((this.focusNext.get(k) ?? 0) <= now) { this.focusNext.set(k, now + 20_000); return f; }
+      if ((this.focusNext.get(k) ?? 0) <= now) { this.focusNext.set(k, now + 15_000); return f; }
     }
     let best: Box | null = null;
     for (const b of this.boxes) if (b.next <= now && (!best || b.next < best.next)) best = b;
@@ -83,8 +83,8 @@ export class OpenWaters {
       }
       if (q.box) {
         q.box.count = n;
-        // Busy seas every 3 minutes, quiet ones every 10, empty ones hourly.
-        q.box.next = now + (n > 200 ? 180_000 : n > 0 ? 600_000 : 3_600_000);
+        // Busy seas every 2 minutes, quiet ones every 7, empty ones hourly.
+        q.box.next = now + (n > 200 ? 120_000 : n > 0 ? 420_000 : 3_600_000);
       }
       this.status.success(this.ships, 'worldwide: AISHub, aisstream.io, BarentsWatch and volunteers');
     } catch (e) {

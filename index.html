@@ -20,8 +20,11 @@
       <nav class="nav">
         <button data-act="search" title="Search (/)">Search</button>
         <button data-act="layers" title="Layers (L)">Layers</button>
+        <button data-act="news" title="Headlines (H)">News</button>
+        <button data-act="nearby" title="What is overhead (O)">Near me</button>
+        <button data-act="log" title="Spacecraft, launches, drones, military (K)">Log</button>
         <button data-act="index" title="Index (I)">Index</button>
-        <button data-act="about" title="About (?)">About</button>
+        <button data-act="about" class="nav-about" title="About (?)">About</button>
       </nav>
     </header>
 
@@ -30,6 +33,9 @@
     <aside class="panel" id="panel" aria-label="Details"></aside>
     <div class="pop" id="layers" role="dialog" aria-label="Layers" hidden></div>
     <div class="search" id="search" role="dialog" aria-label="Search" hidden></div>
+    <aside class="drawer" id="news" aria-label="Headlines" hidden></aside>
+    <aside class="drawer" id="nearby" aria-label="Overhead" hidden></aside>
+    <aside class="drawer" id="log" aria-label="Log" hidden></aside>
     <footer class="status" id="status"></footer>
     <div class="legend" id="legend"></div>
     <section class="index" id="index" aria-label="Index" hidden></section>

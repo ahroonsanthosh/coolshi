@@ -16,6 +16,8 @@ import { loadWinds, onWinds, winds } from '../state/winds.ts';
 import { altColorExpr, altColor, EMERGENCY, INK, QUAKE, SHIP, SHIP_STILL } from './colors.ts';
 import { picture, type Aircraft, type Ship } from '../state/data.ts';
 import { app, type Selection } from '../state/app.ts';
+import { news } from '../state/news.ts';
+import { space, countdown } from '../state/space.ts';
 import { altitude } from '../lib/format.ts';
 import airportsRaw from '../data/airports.json';
 
@@ -163,6 +165,34 @@ function setup() {
     },
   });
 
+  // News: one marker per place a headline names, numbered when several do.
+  addSource('news');
+  map.addLayer({
+    id: 'news', type: 'circle', source: 'news',
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['get', 'n'], 1, 4.5, 4, 6.5, 12, 9],
+      'circle-color': ['case', ['get', 'severe'], '#b3261e', ['==', ['get', 'topic'], 'sea'], '#0b6b60', ['==', ['get', 'topic'], 'air'], '#3640a8', '#57524c'],
+      'circle-opacity': ['interpolate', ['linear'], ['get', 'ageH'], 0, 0.95, 12, 0.7, 48, 0.4],
+      'circle-stroke-color': PAPER.bg, 'circle-stroke-width': 1.5,
+      'circle-pitch-alignment': 'map',
+    },
+  });
+  map.addLayer({
+    id: 'news-labels', type: 'symbol', source: 'news', minzoom: 3,
+    layout: {
+      'text-field': ['get', 'label'], 'text-font': LABEL_FONT, 'text-size': 10.5, 'text-max-width': 16,
+      'text-offset': [0, 0.9], 'text-anchor': 'top', 'text-optional': true, 'symbol-sort-key': ['get', 'sort'],
+    },
+    paint: { 'text-color': '#57524c', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.6 },
+  });
+  map.addLayer({
+    id: 'news-n', type: 'symbol', source: 'news', filter: ['>', ['get', 'n'], 1],
+    layout: { 'text-field': ['to-string', ['get', 'n']], 'text-font': LABEL_FONT_BOLD, 'text-size': 9, 'text-allow-overlap': true },
+    paint: { 'text-color': '#fff' },
+  });
+  news.on(updateNews);
+  updateNews();
+
   // Pulses: fresh earthquakes and emergencies breathe.
   addSource('pulse');
   map.addLayer({
@@ -213,6 +243,46 @@ function setup() {
     id: 'iss-track', type: 'line', source: 'iss-track',
     paint: { 'line-color': INK, 'line-width': 0.9, 'line-opacity': ['match', ['get', 'part'], 'past', 0.18, 0.4], 'line-dasharray': ['match', ['get', 'part'], 'past', ['literal', [1, 0]], ['literal', [3, 3]]] as any },
   });
+  // Spacecraft, propagated from their orbits every second, and launch pads
+  // with what is about to leave them.
+  addSource('sat-track');
+  map.addLayer({
+    id: 'sat-track', type: 'line', source: 'sat-track',
+    paint: { 'line-color': '#5a2da0', 'line-width': 1, 'line-opacity': ['match', ['get', 'part'], 'past', 0.25, 0.55], 'line-dasharray': ['match', ['get', 'part'], 'past', ['literal', [1, 0]], ['literal', [3, 3]]] as any },
+  });
+  addSource('sats');
+  map.addLayer({
+    id: 'sats', type: 'symbol', source: 'sats',
+    layout: {
+      'icon-image': ['match', ['get', 'kind'], ['station', 'crew', 'cargo'], 'iss', 'sat'],
+      'icon-size': ['match', ['get', 'kind'], 'station', 0.62, ['crew', 'cargo'], 0.5, 'telescope', 0.42, 0.3],
+      'icon-allow-overlap': true,
+      'symbol-sort-key': ['get', 'sort'],
+      'text-field': ['step', ['zoom'], ['case', ['get', 'major'], ['get', 'label'], ''], 3.5, ['get', 'label']],
+      'text-font': LABEL_FONT_BOLD, 'text-size': 9.5, 'text-offset': [0, 1.2], 'text-anchor': 'top', 'text-optional': true, 'text-letter-spacing': 0.06,
+    },
+    paint: {
+      'icon-color': ['case', ['get', 'sel'], INK, ['get', 'major'], '#5a2da0', '#8a7fa6'],
+      'icon-halo-color': PAPER.bg, 'icon-halo-width': 1.5, 'icon-opacity': ['case', ['get', 'major'], 1, 0.75],
+      'text-color': '#5a2da0', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.5,
+    },
+  });
+  addSource('launches');
+  map.addLayer({
+    id: 'launches', type: 'symbol', source: 'launches',
+    layout: {
+      'icon-image': 'rocket', 'icon-size': ['case', ['get', 'soon'], 0.62, 0.48], 'icon-allow-overlap': true,
+      'text-field': ['step', ['zoom'], ['case', ['get', 'soon'], ['get', 'label'], ''], 3, ['get', 'label']],
+      'text-font': LABEL_FONT, 'text-size': 10, 'text-offset': [0, 1.3], 'text-anchor': 'top', 'text-optional': true, 'text-max-width': 14,
+    },
+    paint: {
+      'icon-color': ['case', ['get', 'crewed'], '#b3261e', '#2a2724'], 'icon-halo-color': PAPER.bg, 'icon-halo-width': 1.5,
+      'text-color': '#57524c', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.5,
+    },
+  });
+  space.on(() => { lastSpace = 0; updateLaunches(); });
+  setInterval(updateLaunches, 30_000);
+
   addSource('iss');
   map.addLayer({
     id: 'iss', type: 'symbol', source: 'iss',
@@ -393,7 +463,9 @@ const LAYER_GROUPS: Record<string, string[]> = {
   airports: ['airports', 'airport-labels'],
   quakes: ['quakes', 'quake-fill', 'quake-labels'],
   disasters: ['disasters'],
+  news: ['news', 'news-labels', 'news-n'],
   iss: ['iss', 'iss-track'],
+  space: ['sats', 'sat-track', 'launches'],
   night: NIGHT_BANDS.map((d) => `night${d}`),
   trails: ['trail'],
   winds: ['winds'],
@@ -496,6 +568,29 @@ function updateWorld() {
   sources['iss-track'].setData(fc(lines));
 }
 
+function updateNews() {
+  if (!sources.news) return;
+  const now = Date.now();
+  const by = new Map<string, typeof news.items>();
+  for (const i of news.items) {
+    if (!i.place) continue;
+    const k = i.place.name;
+    if (!by.has(k)) by.set(k, []);
+    by.get(k)!.push(i);
+  }
+  sources.news.setData(fc([...by.entries()].map(([name, list]) => {
+    const top = list.find((i) => i.severe) ?? list[0];
+    const t = top.title.length > 64 ? top.title.slice(0, 62).replace(/\s+\S*$/, '') + '…' : top.title;
+    return {
+      type: 'Feature', geometry: { type: 'Point', coordinates: [top.place!.lon, top.place!.lat] },
+      properties: {
+        id: name, n: list.length, topic: top.topic, severe: list.some((i) => i.severe && now - i.time < 12 * 3600_000),
+        ageH: (now - list[0].time) / 3_600_000, label: list.length > 1 ? `${name}: ${t}` : t, sort: -list.length,
+      },
+    };
+  })));
+}
+
 /** The ISS's position now, interpolated between one-minute samples. */
 export function issNow(): { lat: number; lon: number; alt: number; vel: number } | null {
   const tr = picture.world?.iss;
@@ -563,6 +658,7 @@ function frame(t: number) {
   const interval = n > 5000 ? 1500 : n > 2500 ? 600 : n > 800 ? 200 : z > 6 ? 50 : 120;
   animatePulse(t);
   updateIss();
+  updateSpace();
   if (!needsFull && t - lastDraw < interval) {
     updateSelectionOnly();
     return;
@@ -816,6 +912,64 @@ let pulseCount = 0;
 let lastPulseData = 0;
 
 let lastIss = 0;
+let lastSpace = 0;
+let trackFor = '';
+let trackAt = 0;
+function updateSpace() {
+  const now = performance.now();
+  if (now - lastSpace < 1000 || !sources.sats) return;
+  lastSpace = now;
+  const sel = app.selection?.kind === 'sat' ? app.selection.id : '';
+  if (!app.layers.space && !sel) { sources.sats.setData(fc()); return; }
+  const feats: GeoJSON.Feature[] = [];
+  for (const s of space.sats) {
+    const id = `sat:${s.norad}`;
+    // The ISS has its own layer (with its wheretheiss.at track).
+    if (s.norad === 25544 && id !== sel) continue;
+    const p = space.pos(s);
+    if (!p) continue;
+    const major = s.kind === 'station' || s.kind === 'crew' || s.kind === 'cargo' || s.kind === 'telescope';
+    feats.push({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+      properties: { id, kind: s.kind, major, sel: id === sel, label: s.name.replace(/\s*\(.*\)$/, ''), sort: major ? 1 : 0 },
+    });
+    if (id === sel) {
+      sources.sel?.setData(fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } }]));
+      if (app.follow) map.setCenter([p.lon, p.lat]);
+    }
+  }
+  sources.sats.setData(fc(feats));
+  // The selected spacecraft's ground track, 45 min back and one orbit on.
+  if (sel !== trackFor || (sel && now - trackAt > 30_000)) {
+    trackFor = sel; trackAt = now;
+    const s = sel ? space.get(sel) : undefined;
+    if (!s) { sources['sat-track'].setData(fc()); if (!sel && app.selection?.kind !== 'air' && app.selection?.kind !== 'sea') sources.sel?.setData(fc()); return; }
+    const tr = space.track(s, 45, Math.min(100, s.periodMin));
+    sources['sat-track'].setData(fc([
+      ...tr.past.map((c) => ({ type: 'Feature' as const, properties: { part: 'past' }, geometry: { type: 'LineString' as const, coordinates: c } })),
+      ...tr.future.map((c) => ({ type: 'Feature' as const, properties: { part: 'future' }, geometry: { type: 'LineString' as const, coordinates: c } })),
+    ]));
+  }
+}
+
+function updateLaunches() {
+  if (!sources.launches) return;
+  const now = Date.now();
+  const byPad = new Map<string, (typeof space.launches)[number]>();
+  for (const l of space.launches) {
+    if (l.net < now - 3 * 3600_000) continue;
+    const k = `${l.lat.toFixed(2)},${l.lon.toFixed(2)}`;
+    if (!byPad.has(k)) byPad.set(k, l); // soonest per pad
+  }
+  sources.launches.setData(fc([...byPad.values()].map((l) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: [l.lon, l.lat] },
+    properties: {
+      id: l.id, crewed: l.crewed, soon: l.net - now < 48 * 3600_000,
+      label: `${l.rocket.replace(/ Block \d+/, '') || l.name.split('|')[0].trim()} · ${countdown(l.net)}`,
+    },
+  }))));
+}
+
 function updateIss() {
   const now = performance.now();
   if (now - lastIss < 500) return;
@@ -828,7 +982,7 @@ function updateIss() {
 // ---------------------------------------------------------------------------
 // Pointer
 
-const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'airports', 'iss'];
+const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'news', 'airports', 'iss', 'sats', 'launches'];
 
 function toSelection(f: MapGeoJSONFeature): Selection | null {
   const id = f.properties?.id as string;
@@ -837,6 +991,9 @@ function toSelection(f: MapGeoJSONFeature): Selection | null {
     case 'ships': case 'ship-dots': return { kind: 'sea', id };
     case 'quakes': return { kind: 'quake', id };
     case 'disasters': return { kind: 'disaster', id };
+    case 'news': return { kind: 'news', id };
+    case 'sats': return { kind: 'sat', id };
+    case 'launches': return { kind: 'launch', id };
     case 'airports': return { kind: 'airport', id };
     case 'iss': return { kind: 'iss', id: 'iss' };
   }
@@ -849,7 +1006,7 @@ function pick(point: maplibregl.Point): Selection | null {
   const feats = map.queryRenderedFeatures(box, { layers });
   if (!feats.length) return null;
   // Nearest wins, with tracks preferred over the background events.
-  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' ? 0 : l === 'airports' ? 2 : 1);
+  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' || l === 'sats' ? 0 : l === 'airports' ? 2 : 1);
   feats.sort((a, b) => rank(a.layer.id) - rank(b.layer.id));
   return toSelection(feats[0]);
 }

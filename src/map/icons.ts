@@ -46,6 +46,8 @@ const PATHS: Record<string, string[]> = {
     'M14 30h17v40h-17Z', 'M69 30h17v40h-17Z', 'M31 47.5h38v5h-38Z', 'M43 36h14v28h-14Z',
   ],
   diamond: ['M50 8L92 50L50 92L8 50Z'],
+  rocket: ['M50 4C62 16 66 34 64 62L76 78V92L62 84H38L24 92V78L36 62C34 34 38 16 50 4Z'],
+  sat: ['M40 40h20v20h-20Z', 'M8 44h26v12h-26Z', 'M66 44h26v12h-26Z'],
   arrow: ['M50 4L76 42H58V96H42V42H24Z'],
 };
 
