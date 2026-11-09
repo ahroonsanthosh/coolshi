@@ -23,10 +23,26 @@ class BrainError(RuntimeError):
     pass
 
 
+KEY_FILE = Path.home() / ".m5e" / "anthropic_key"   # written by install.command / install.bat
+
+
+def _load_saved_key() -> None:
+    """Use the key the installer saved, unless one is already set in the environment."""
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return
+    try:
+        key = KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if key:
+        os.environ["ANTHROPIC_API_KEY"] = key
+
+
 def available() -> bool:
     import importlib.util
     if importlib.util.find_spec("anthropic") is None:
         return False
+    _load_saved_key()
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return True
     return (Path.home() / ".config" / "anthropic").exists()
@@ -39,6 +55,7 @@ def _client_():
     global _client
     if _client is None:
         import anthropic
+        _load_saved_key()
         _client = anthropic.Anthropic(max_retries=4, timeout=600)
     return _client
 

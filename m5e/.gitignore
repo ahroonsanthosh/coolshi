@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
+.venv/
 m5e_project/
 m5e_out/

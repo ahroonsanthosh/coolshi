@@ -46,25 +46,36 @@ London-style captions and renders at the highest quality Instagram will take.
 Without an API key, everything runs except the AI steps (2 and 6). A rule-based director makes the same kinds of
 decisions (story, rhythm, bursts, sound) from measurements alone. It just can't *see* what's in the shots.
 
+## Get it on your computer
+
+m5e runs **on your laptop**, not on a server. A day of Pocket 4P 3K footage is several GB, so uploading it would
+take longer than the edit, and decoding 3K HEVC, speech-to-text and rendering need a real CPU. Your laptop already
+has the footage and DaVinci.
+
+1. Download the code: on GitHub, open the repo, switch to the branch, press **Code -> Download ZIP**, and unzip
+   it. Or with git:
+
+```bash
+git clone -b claude/funny-davinci-fwx5ce https://github.com/ahroonsanthosh/coolshi.git
+```
+
+2. Open the `m5e` folder inside it.
+
 ## Install (once)
 
-1. **Python 3.10+**: <https://www.python.org/downloads/>
-2. **ffmpeg**: Mac `brew install ffmpeg`, Windows `winget install Gyan.FFmpeg`.
-3. In this folder:
+- **Mac:** double-click **`install.command`**. The first time, right-click -> **Open** so macOS lets it run.
+  It needs [Homebrew](https://brew.sh) and tells you if it's missing.
+- **Windows:** double-click **`install.bat`**. If it installs ffmpeg or Python, it asks you to run it once more.
 
-```bash
-pip install -r requirements.txt
-```
-
-4. **Anthropic API key**: create one at <https://console.anthropic.com>, then
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-(Windows PowerShell: `$env:ANTHROPIC_API_KEY="sk-ant-..."`)
+The installer sets up m5e's own Python environment (`.venv`), installs ffmpeg if needed, and downloads the
+speech-to-text model (~500 MB, one time). It then asks for your **Anthropic API key** (create one at
+<https://console.anthropic.com> -> API Keys) and saves it in `~/.m5e/anthropic_key`, readable only by you.
+Press Enter to skip; m5e then uses its rule-based director until you add a key.
 
 ## Use
+
+1. Make a folder for the reel and copy in the day's clips (straight off the Pocket 4P), the voiceover from the
+   DJI Mic as `vo.m4a`, and optionally `music.mp3`:
 
 ```
 lisbon-day1/
@@ -76,22 +87,36 @@ lisbon-day1/
   m5e.json                          optional settings
 ```
 
-```bash
-python -m m5e make ~/Desktop/lisbon-day1
-```
+2. Double-click **`m5e.command`** (Mac) or **`m5e.bat`** (Windows) and choose that folder.
+3. Your browser opens the review page and m5e gets to work. The first run of a folder takes a few minutes,
+   depending on how much footage there is. When it's done you'll see:
+   - the reel
+   - every shot, and why it was or wasn't used
+   - the story and sound notes, and the quality checks
 
-Or open the review page. It shows the reel, every shot and why it was or wasn't used, the story/sound notes and
-the quality checks. You can ban or force shots, write a brief, and re-cut:
+   Ban shots, force shots, write a brief, and press **Re-cut**. Leave the black window open while you work;
+   close it to stop.
+4. The finished reel is in `lisbon-day1/m5e_out/`. AirDrop it to your phone and post it.
 
-```bash
-python -m m5e ui ~/Desktop/lisbon-day1
-```
-
-Results land in `lisbon-day1/m5e_out/`: the reel (`.mp4`), the Resolve timeline (`.fcpxml`), `captions.srt`
-(fix a word there and run `make` again; your text is used), and `report.html`.
+`m5e_out/` also has the DaVinci timeline (`.fcpxml`), `captions.srt` (fix a word there and re-cut; your text is
+used) and `report.html`.
 
 No voiceover? m5e makes a **natural-sound** edit from the lines people say in the clips, with clean moments
 between them. A line said over soft footage plays over clean footage instead (an L-cut).
+
+### From the terminal (optional)
+
+```bash
+.venv/bin/python -m m5e make ~/Desktop/lisbon-day1
+```
+
+That renders straight to `m5e_out/` without the review page.
+
+```bash
+.venv/bin/python -m m5e ui ~/Desktop/lisbon-day1
+```
+
+That opens the review page. On Windows, use `.venv\Scripts\python` instead of `.venv/bin/python`.
 
 ## Osmo Pocket 4P
 
