@@ -3,6 +3,7 @@ services:
   - type: web
     name: watchman
     runtime: node
+    rootDir: watchman
     plan: free
     branch: claude/practical-mccarthy-yfijni
     buildCommand: npm ci --include=dev && npm run build
