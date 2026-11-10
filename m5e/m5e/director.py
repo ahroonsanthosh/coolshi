@@ -1,7 +1,8 @@
-"""The rule-based director: decides what goes where, how long each cut holds, where a quick-cut burst
-lands, and where (sparingly) a sound effect helps. The AI director makes the same kinds of decisions
-with real understanding of the footage; this one is what runs without an API key, and it's also the
-safety net that repairs the AI's plan.
+"""The free director: decides what goes where, how long each cut holds, where a quick-cut burst lands, and
+where (sparingly) a sound effect helps. It sees the footage through the free local vision model (see.py) and
+the measurements. When Claude is available (your Claude subscription, through Claude Code) Claude makes the
+same kinds of decisions; this director is what runs without it, and it's also the safety net that repairs
+Claude's plan.
 
 House rules come from three places:
   - the creator's own editing profile (profiles/krios.json: opens fast, settles, holds the payoff)
@@ -122,7 +123,7 @@ def choose_bursts(beats, beat_scene, cuts, vo_dur, words, pool_by_scene, max_bur
 # ------------------------------------------------------------------------------------------- shots
 
 class Picker:
-    def __init__(self, cands, notes, metrics, clip_order, banned, must, shot_scene=None):
+    def __init__(self, cands, notes, metrics, clip_order, banned, must, shot_scene=None, sem=None):
         self.pool = plan.eligible(cands, notes, set(banned)) or plan.eligible(cands, notes, set(banned), strict=False)
         self.notes = notes
         self.metrics = metrics
@@ -132,6 +133,7 @@ class Picker:
         self.left = {(c["clip"], c["run"][0]): c["run"][1] - c["run"][0] for c in cands}
         self.uses: dict[tuple, int] = {}
         self.shot_scene = shot_scene or {}
+        self.sem = sem or {}          # (beat index, shot id) -> how well the shot shows that line (z-score)
         self.must = set(must) - set(banned)
         self.text = {c["id"]: set(story.content_words(" ".join([notes.get(c["id"], {}).get("what", ""),
                                                                 notes.get(c["id"], {}).get("setting", ""),
@@ -149,14 +151,19 @@ class Picker:
             s -= 0.3
         if beat["intent"] in ("hook", "payoff"):
             s += 0.5 * min(c["face"] * 4, 1) + 0.08 * n.get("hook", 0)
-        s += 0.4 * min(len(set(beat["keys"]) & self.text.get(c["id"], set())), 2)   # show what's said
+        s += 0.4 * min(len(set(beat["keys"]) & self.text.get(c["id"], set())), 2)   # show what's said (words)
+        run = self.left.get((c["clip"], c["run"][0]), c["run"][1] - c["run"][0])
+        if "k" in beat and self.sem:
+            # ...and what the vision model sees, in proportion to how much of the slot the shot can fill
+            # (half a slot of the right picture, then a stand-in, isn't "showing what's said")
+            z = float(np.clip(self.sem.get((beat["k"], c["id"]), 0.0), -1.5, 3.0))
+            s += 0.22 * z * (min(1.0, run / max(length, 1e-6)) if z > 0 else 1.0)
         s += 0.04 * n.get("energy", 3) * (1 if beat["intent"] in ("transition", "list", "hook") else 0)
         if prev is not None:
             if "hash" in c and "hash" in prev and hamming(c["hash"], prev["hash"]) <= 12:
                 s -= 0.5                                         # near-identical framing back to back = jump cut
             if st and st == self.notes.get(prev["id"], {}).get("shot_type"):
                 s -= 0.15                                        # vary shot size/type
-        run = self.left.get((c["clip"], c["run"][0]), c["run"][1] - c["run"][0])
         if run < length:
             s -= 0.8 * (length - run) / max(length, 1e-6)   # it would run out and need covering
         if c["id"] in self.used:
@@ -241,14 +248,18 @@ def plan_sfx(beats, beat_scene, bursts, cuts, vo_dur) -> list[dict]:
 # ------------------------------------------------------------------------------------------- direct
 
 def direct(words, vo_dur, cands, notes, metrics, clips, clip_order, pace_at, first_shot, banned=(), must=(),
-           music_beats=None):
-    """Full rule-based plan: beats, scenes, cut times, bursts, shot choice, sound."""
+           music_beats=None, sem_fn=None):
+    """Full rule-based plan: beats, scenes, cut times, bursts, shot choice, sound.
+    sem_fn(beats) -> {(beat index, shot id): score} adds what the free local vision model sees."""
     bts = story.beats(words)
+    for k, b in enumerate(bts):
+        b["k"] = k
+    sem = sem_fn(bts) if sem_fn else {}
     scs = story.scenes(clips, [c for c in cands if "duplicate" not in c["flags"]], notes)
-    beat_scene = story.align(bts, scs, vo_dur, notes, cands)
+    beat_scene = story.align(bts, scs, vo_dur, notes, cands, sem)
     cuts = plan_cuts(words, vo_dur, bts, pace_at, first_shot, music_beats)
     shot_scene = {x: k for k, sc in enumerate(scs) for x in sc["shots"]}
-    picker = Picker(cands, notes, metrics, clip_order, banned, must, shot_scene)
+    picker = Picker(cands, notes, metrics, clip_order, banned, must, shot_scene, sem)
     pool_ids = {c["id"] for c in picker.pool}
     pool_by_scene = {k: [x for x in sc["shots"] if x in pool_ids] for k, sc in enumerate(scs)}
     bursts = choose_bursts(bts, beat_scene, cuts, vo_dur, words, pool_by_scene, music_beats=music_beats)

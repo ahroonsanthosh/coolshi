@@ -1,0 +1,4 @@
+# Windows needs CRLF in batch files (labels and goto misbehave with LF); keep them byte-for-byte
+*.bat -text
+*.command text eol=lf
+*.sh text eol=lf

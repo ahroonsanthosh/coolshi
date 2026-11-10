@@ -1,6 +1,7 @@
 """The whole pipeline for one folder of clips."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import html
 import json
@@ -13,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from . import (analyze, audio, brain, captions, director, fcpxml, media, metrics, music, plan, reference, render,
-               sfx, style, transcribe)
+               see, sfx, style, transcribe)
 from . import profile as profiles
 
 WORK = "m5e_project"
@@ -38,14 +39,15 @@ class Project:
         self.state.setdefault("ban", [])
         self.state.setdefault("must", [])
         self.state.setdefault("notes", {})
-        self.ref, self.style_ref, self.notes = {}, "", {}
+        self.ref, self.style_ref, self.notes, self.emb = {}, "", {}, {}
         self.sfx, self.music_beats = [], None
         self.profile = profiles.load(self.cfg.get("profile"))
+        brain.configure(self.cfg.get("claude", True), log)
 
     # ------------------------------------------------------------------ setup
     def _config(self) -> dict:
         p = self.folder / "m5e.json"
-        cfg = {"pace": style.PACE, "profile": style.PROFILE, "sfx": True, "ambience": True,
+        cfg = {"pace": style.PACE, "profile": style.PROFILE, "sfx": True, "ambience": True, "claude": True,
                "whisper": "small", "context": DEFAULT_CONTEXT, "brief": "", "lut": None,
                "grade": style.GRADE, "max_len": 60, "review_passes": 2, "tighten_vo": True, "stabilize": False,
                "vocab": style.VOCAB, "fixes": {}, "name": self.folder.name}
@@ -161,24 +163,70 @@ class Project:
             self.log("  note: " + msg)
             self.state.setdefault("warnings", []).append(msg)
 
-    def understand(self):
-        """AI looks at every candidate shot and logs what's actually in it."""
-        if not brain.available():
-            self.log("No Anthropic API key found: using the rule-based editor (focus/faces/chronology only).")
-            self.notes = {}
-            return
-        def key(c):
-            return hashlib.sha1(json.dumps([c["id"], c["start"], c["end"], self.clips[c["clip"]]["path"]]).encode()).hexdigest()[:12]
-        todo = [c for c in self.cands if "duplicate" not in c["flags"]
-                and self.state["notes"].get(c["id"], {}).get("_key") != key(c)]
+    def _key(self, c) -> str:
+        info = self.clips[c["clip"]]
+        return hashlib.sha1(json.dumps([c["id"], c["start"], c["end"], info["path"],
+                                        int(os.path.getmtime(info["path"]))]).encode()).hexdigest()[:12]
+
+    def _embeddings(self, cands: list[dict]) -> dict:
+        """One CLIP embedding per shot (free, on this computer), cached between runs."""
+        path = self.work / "clip_embeddings.npz"
+        cache = {}
+        if path.exists():
+            try:
+                with np.load(path) as z:
+                    cache = {k: z[k] for k in z.files}
+            except (OSError, ValueError):
+                cache = {}
+        keys = {c["id"]: "k" + self._key(c) for c in cands}
+        todo = [c for c in cands if keys[c["id"]] not in cache]
         if todo:
-            self.log(f"AI is looking at {len(todo)} shots to understand what's in them...")
-            notes = brain.describe(todo, self.work / "strips", self.clip_order, self.cfg.get("context", ""))
+            new = see.embed_shots(todo, self.work / "strips")
             for c in todo:
-                if c["id"] in notes:
-                    self.state["notes"][c["id"]] = {**notes[c["id"]], "_key": key(c)}
-            self.save()
-        self.notes = {k: v for k, v in self.state["notes"].items() if any(c["id"] == k for c in self.cands)}
+                cache[keys[c["id"]]] = new[c["id"]]
+            np.savez(path, **{k: cache[k] for k in set(keys.values())})
+        return {c["id"]: cache[keys[c["id"]]] for c in cands}
+
+    def understand(self):
+        """What's in every shot. The free local vision model logs all of them; when Claude is available (your
+        Claude subscription, through Claude Code) it logs them too and its notes win."""
+        live = [c for c in self.cands if "duplicate" not in c["flags"]]
+        self.emb, notes = {}, {}
+        if not see.available():
+            self.log("  the free local vision model isn't installed (run the installer again); judging shots by "
+                     "measurements only")
+        elif live:
+            self.log(f"Looking at {len(live)} shots with the free local vision model...")
+            try:
+                self.emb = self._embeddings(live)
+                notes = see.notes_for(live, self.emb)
+            except Exception as e:      # a broken model download mustn't stop the edit
+                self.log(f"  the local vision model failed ({e}); judging shots by measurements only")
+                self.emb, notes = {}, {}
+        saved = self.state["notes"]
+        keys = {c["id"]: self._key(c) for c in live}
+        todo = [c for c in live if saved.get(c["id"], {}).get("_key") != keys[c["id"]]]
+        self.log("  " + brain.status())
+        if todo and brain.available():
+            self.log(f"Claude is logging {len(todo)} shots...")
+
+            def keep(got):
+                for k, v in got.items():
+                    saved[k] = {**v, "_key": keys[k], "_source": "claude"}
+                self.save()
+            try:
+                brain.describe(todo, self.work / "strips", self.clip_order, self.cfg.get("context", ""), on_notes=keep)
+            except brain.LimitHit as e:
+                self.log(f"  Claude: {e}. m5e stopped using Claude; the free local model covers the rest.")
+            except brain.BrainError as e:
+                self.log(f"  Claude couldn't log the shots ({e}); the free local model covers them.")
+        for c in live:                      # Claude's notes (this run or an earlier one) win
+            n = saved.get(c["id"])
+            if n and n.get("_key") == keys[c["id"]]:
+                notes[c["id"]] = n
+        self.notes = notes
+        n_claude = sum(n.get("_source") == "claude" for n in notes.values())
+        self.state["understood_by"] = {"claude": n_claude, "local": len(notes) - n_claude}
 
     def rhythm_template(self):
         """Where the cut rhythm comes from: a reference video if given, else the editing profile."""
@@ -268,6 +316,8 @@ class Project:
         ban, must = set(self.state["ban"]), set(self.state["must"])
         pace = float(self.cfg["pace"])
         use_ai = bool(self.notes) and brain.available()
+        self.state["directed_by"] = "free director"
+        self.state["ai_notes"] = {}
         if self.mode in ("vo", "montage"):
             words, dur = self.words, self.vo_dur
             if self.mode == "montage":
@@ -280,7 +330,7 @@ class Project:
             ai_sfx = []
             if use_ai and self.mode == "vo":
                 try:
-                    self.log("AI director is planning the edit: story, cuts, bursts, sound...")
+                    self.log("Claude is directing the edit: story, cuts, bursts, sound...")
                     bts, scs, bsc = director.story_context(words, dur, self.cands, self.notes, self.clips)
                     p = brain.direct_vo(words, dur, bts, scs, bsc,
                                         [c for c in self.cands if "duplicate" not in c["flags"]], self.notes,
@@ -290,18 +340,21 @@ class Project:
                     segs, ai_sfx = director.from_ai(p, words, dur, self.cands, self.music_beats)
                     if not segs:
                         segs = None
+                    else:
+                        self.state["directed_by"] = "Claude"
                     self.state["ai_notes"] = {"story": p.story, "hook": p.hook_note, "ending": p.ending_note,
                                               "vo_feedback": p.vo_feedback}
                     self.state["story"] = {"beats": bts, "scenes": [{k: v for k, v in sc.items() if k != "shots"}
                                                                     for sc in scs], "beat_scene": bsc}
                 except brain.BrainError as e:
-                    self.log(f"  AI director unavailable ({e}); using the rule-based director.")
+                    self.log(f"  Claude: {e}. The free director is cutting this one.")
             template = self.rhythm_template()
             pace_at = plan.pace_curve(dur, pace, template)
             sfx_plan = []
             if segs is None:
+                sem_fn = (lambda bts: see.beat_shot_scores(bts, self.emb)) if self.emb and self.mode == "vo" else None
                 d = director.direct(words, dur, self.cands, self.notes, self.metrics, self.clips, self.clip_order,
-                                    pace_at, self.first_shot(), ban, must, self.music_beats)
+                                    pace_at, self.first_shot(), ban, must, self.music_beats, sem_fn=sem_fn)
                 segs, sfx_plan = d["seq"], d["sfx"]
                 self.state["story"] = {"beats": d["beats"], "scenes": [{k: v for k, v in sc.items() if k != "shots"}
                                                                          for sc in d["scenes"]],
@@ -320,14 +373,15 @@ class Project:
             segs = None
             if use_ai:
                 try:
-                    self.log("AI editor is choosing the best moments and lines...")
+                    self.log("Claude is choosing the best moments and lines...")
                     p = brain.plan_talk(utts, [c for c in self.cands if "duplicate" not in c["flags"]], self.notes,
                                         self.clip_order, float(self.cfg["max_len"]), ban, must, revision_notes,
                                         self.cfg["brief"], self.style_ref)
                     segs = [s.model_dump() for s in p.segments]
                     self.state["ai_notes"] = {"hook": p.hook_note}
+                    self.state["directed_by"] = "Claude"
                 except brain.BrainError as e:
-                    self.log(f"  AI editor unavailable ({e}); using the rule-based editor.")
+                    self.log(f"  Claude: {e}. The free editor is cutting this one.")
             if segs is None:
                 segs = plan.heuristic_talk(utts, self.cands, self.notes, self.clip_order, float(self.cfg["max_len"]), ban)
             self.timeline, self.cap_words = plan.build_talk_timeline(segs, self.clip_words, self.cands, self.notes,
@@ -421,16 +475,16 @@ class Project:
 
     def review_loop(self, out: Path) -> Path:
         passes = int(self.cfg.get("review_passes", 2))
-        if not brain.available() or not self.notes or passes <= 0:
+        if passes <= 0 or not self.notes or not brain.available():
             return out
         history = []
         for k in range(passes):
             sheets = render.contact_sheets(out, self.work / "review")
-            self.log(f"AI reviewer is watching the cut (pass {k + 1}/{passes})...")
+            self.log(f"Claude is watching the cut (pass {k + 1}/{passes})...")
             try:
                 rv = brain.review(sheets, self.edl_text(), self.style_ref, metrics.as_text(self.quality))
             except brain.BrainError as e:
-                self.log(f"  review unavailable ({e})")
+                self.log(f"  Claude: {e}. Keeping this cut.")
                 break
             history.append(rv.model_dump())
             self.state["reviews"] = history
@@ -441,9 +495,28 @@ class Project:
             if rv.ship_it or not rv.fixes:
                 break
             notes = "\n".join(f"- segment {f.segment}: {f.problem}. Fix: {f.fix}" for f in rv.fixes)
+            before = self._snapshot()
             self.plan(revision_notes=notes)
+            if self.state.get("directed_by") != "Claude":
+                # Claude couldn't make the fixes (e.g. the plan's limit was reached): keep the reviewed cut
+                # rather than swapping in a different editor's cut
+                self._restore(before)
+                self.log("  keeping the reviewed cut")
+                break
             out = self.render()
         return out
+
+    _PLAN_KEYS = ("timeline", "cap_words", "sfx", "quality", "warnings", "story", "ai_notes", "directed_by")
+
+    def _snapshot(self) -> dict:
+        return copy.deepcopy({"attrs": {k: getattr(self, k, None) for k in ("timeline", "cap_words", "sfx", "quality")},
+                              "state": {k: self.state.get(k) for k in self._PLAN_KEYS}})
+
+    def _restore(self, snap: dict) -> None:
+        for k, v in snap["attrs"].items():
+            setattr(self, k, v)
+        self.state.update(snap["state"])
+        self.save()
 
     # ------------------------------------------------------------------ report
     def report(self) -> Path:
@@ -473,11 +546,15 @@ class Project:
         q = self.state.get("quality")
         qhtml = f"<h2>Quality checks</h2><pre>{html.escape(metrics.as_text(q))}</pre>" if q else ""
         fx = ", ".join(f"{x['type']} @{x['t']:.2f}s" for x in self.state.get("sfx", []))
+        ub = self.state.get("understood_by", {})
+        who = ", ".join(f"{name} ({ub[k]})" for k, name in (("claude", "Claude"), ("local", "the free local model"))
+                        if ub.get(k)) or "measurements only"
         doc = f"""<!doctype html><meta charset=utf-8><title>m5e report</title>
 <style>body{{font:14px system-ui;margin:16px;background:#111;color:#eee}}img{{height:90px}}td{{border-top:1px solid #333;
 padding:6px;vertical-align:top}}.c{{display:inline-block;width:330px;margin:4px;vertical-align:top}}</style>
 <h1>{html.escape(self.cfg['name'])}</h1><p>mode: {self.mode} · {len(self.timeline)} shots ·
-{self.timeline[-1]['t1']:.1f}s</p><p>{html.escape(ai.get('hook', ''))}</p><p>{html.escape(ai.get('vo_feedback', ''))}</p>
+{self.timeline[-1]['t1']:.1f}s · cut by {html.escape(self.state.get('directed_by', 'free director'))} ·
+shots logged by {html.escape(who)}</p><p>{html.escape(ai.get('hook', ''))}</p><p>{html.escape(ai.get('vo_feedback', ''))}</p>
 <p>{html.escape(ai.get('story', ''))}</p><ul>{reviews}</ul>{qhtml}<p><b>Sound:</b> {html.escape(fx or 'none')}</p>
 <h2>Cut</h2><table>{''.join(rows)}</table><h2>Not used</h2>{''.join(rej)}"""
         p = self.out / "report.html"

@@ -12,6 +12,7 @@ TEMPLATE = {
     "context": "Footage for @kriosfounders: the three teenage founders of Krios (AI sales training, Cork) - Ahroon, "
                "Michael and Abraham.",
     "profile": "krios",
+    "claude": True,
     "lut": None,
     "sfx": True,
     "ambience": True,
@@ -35,8 +36,9 @@ def main(argv=None):
     mk.add_argument("--pace", type=float, help="force an average shot length in seconds (overrides the profile)")
     mk.add_argument("--name", help="output file name")
     mk.add_argument("--no-sfx", action="store_true", help="no sound effects")
-    mk.add_argument("--no-review", action="store_true", help="skip the AI review/fix passes")
-    mk.add_argument("--no-ai", action="store_true", help="rule-based director only (no API calls)")
+    mk.add_argument("--no-review", action="store_true", help="skip Claude's review/fix passes")
+    mk.add_argument("--no-claude", "--no-ai", dest="no_claude", action="store_true",
+                    help="don't use Claude: the free local editor makes every decision")
 
     ui = sub.add_parser("ui", help="open the review page: see every shot, ban/force shots, re-cut, render")
     ui.add_argument("folder")
@@ -76,12 +78,9 @@ def main(argv=None):
         print(profile.describe(prof))
         print(f"saved {out}")
         return
-    if getattr(a, "no_ai", False):
+    if getattr(a, "no_claude", False):
         import os
-        os.environ.pop("ANTHROPIC_API_KEY", None)
-        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-        from . import brain
-        brain.available = lambda: False
+        os.environ["M5E_CLAUDE"] = "off"
     from .project import Project
     if a.cmd == "make":
         pr = Project(a.folder)

@@ -157,6 +157,40 @@ class TestDirector(unittest.TestCase):
             self.assertLessEqual(float(np.min(np.abs(grid - s["f0"] / 30))), 1.01 / 30)
 
 
+class TestFreeVision(unittest.TestCase):
+    """The free local vision model nudges choices; only Claude's shot log can rule shots out or split scenes."""
+
+    def test_local_notes_never_remove_shots(self):
+        cands, _, _, _ = footage(n_places=2)
+        a, b = cands[0]["id"], cands[1]["id"]
+        local = {a: {"filler": True, "focus_ok": True, "_source": "local"}}
+        claude = {b: {"filler": True, "focus_ok": True, "_source": "claude"}}
+        ids = {c["id"] for c in plan.eligible(cands, {**local, **claude}, set())}
+        self.assertIn(a, ids)
+        self.assertNotIn(b, ids)
+
+    def test_only_claude_settings_split_scenes(self):
+        cands, _, _, clips = footage(n_places=1, clips_per_place=4)
+        noisy = {c["id"]: {"setting": ["cafe", "airport", "beach", "office"][int(c["clip"][1:]) - 1],
+                           "_source": "local"} for c in cands}
+        self.assertEqual(len(story.scenes(clips, cands, noisy)), 1)
+        real = {k: {**v, "_source": "claude"} for k, v in noisy.items()}
+        self.assertEqual(len(story.scenes(clips, cands, real)), 4)
+
+    def test_vision_shows_what_is_said(self):
+        cands, metrics_, order, clips = footage()
+        target = "c13s01"                                 # a shot from the middle of the day
+        pace_at = plan.pace_curve(VO_DUR, 1.4, None)
+
+        def sem_fn(bts):
+            k = next(i for i, b in enumerate(bts) if "Stansted" in b["text"])
+            return {(k, target): 3.0}
+        d = director.direct(VO, VO_DUR, cands, {}, metrics_, clips, order, pace_at, 0.7, sem_fn=sem_fn)
+        beat = next(b for b in d["beats"] if "Stansted" in b["text"])
+        shown = [s.get("shot") for s in d["seq"] if beat["t0"] - 0.1 <= s["t0"] < beat["t1"]]
+        self.assertIn(target, shown)
+
+
 class TestStory(unittest.TestCase):
     def test_beats_and_intents(self):
         bts = story.beats(VO)

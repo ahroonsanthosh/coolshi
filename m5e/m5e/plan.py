@@ -14,7 +14,8 @@ def eligible(cands: list[dict], notes: dict, banned: set, strict: bool = True) -
         if c["id"] in banned or "duplicate" in c["flags"] or "low-res crop" in c["flags"]:
             continue
         n = notes.get(c["id"])
-        if strict and n and (not n.get("focus_ok", True) or n.get("filler")):
+        # Claude's "soft"/"filler" calls rule a shot out; the free local model's only nudge the choice
+        if strict and n and n.get("_source") != "local" and (not n.get("focus_ok", True) or n.get("filler")):
             continue
         if strict and c["score"] < 0.35:
             continue
@@ -115,16 +116,6 @@ class Footage:
 
 def onsets(words: list[dict]) -> list[float]:
     return [max(w["s"] - CUT_LEAD, 0.0) for w in words]
-
-
-def vo_plan_to_seq(segs: list[dict], words: list[dict]) -> list[dict]:
-    """AI plans name the word a shot starts on; convert to times."""
-    ons = onsets(words)
-    out = []
-    for s in sorted(segs, key=lambda s: s["from_word"]):
-        if 0 <= s["from_word"] < len(ons):
-            out.append({**s, "t0": 0.0 if not out else ons[s["from_word"]]})
-    return out
 
 
 def pace_curve(vo_dur: float, pace: float, template):

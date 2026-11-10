@@ -38,23 +38,45 @@ bold "Setting up m5e's own Python environment (.venv)..."
 .venv/bin/python -m pip install --upgrade pip --quiet
 .venv/bin/python -m pip install -r requirements.txt --quiet
 
-bold "Downloading the speech-to-text model (one time, ~500 MB)..."
+bold "Downloading the speech-to-text and vision models (one time, ~1 GB, free, they run on this Mac)..."
 .venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')" \
   || echo "(skipped - it will download on the first edit instead)"
+.venv/bin/python -c "from m5e import see; see.seer()" \
+  || echo "(skipped - it will download on the first edit instead)"
 
-KEYFILE="$HOME/.m5e/anthropic_key"
-if [[ -s "$KEYFILE" ]]; then
-  bold "Anthropic API key: already saved."
-else
-  bold "Anthropic API key (for the AI editor). Create one at https://console.anthropic.com -> API Keys."
-  read -r -s -p "Paste it here and press Enter (or just press Enter to skip for now): " KEY || KEY=""
-  echo
-  if [[ -n "${KEY:-}" ]]; then
-    mkdir -p "$HOME/.m5e"; umask 077; printf '%s' "$KEY" > "$KEYFILE"; chmod 600 "$KEYFILE"
-    echo "Saved to $KEYFILE (only your user can read it)."
+if [[ -f "$HOME/.m5e/anthropic_key" ]]; then
+  rm -f "$HOME/.m5e/anthropic_key"
+  echo "Removed the API key an older m5e saved: m5e never uses pay-per-use API keys now."
+fi
+
+bold "Claude (optional): help from Claude on your Claude Pro/Max plan, never pay-per-use"
+echo "m5e edits for free on this Mac. If Claude Code is logged in with your Claude subscription, m5e also asks"
+echo "Claude to log the shots, direct the cut and review it - on your plan's included usage, and it stops by"
+echo "itself when you hit the plan's limit."
+CLAUDE_BIN="$(command -v claude || true)"
+for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+  if [[ -z "$CLAUDE_BIN" && -x "$c" ]]; then CLAUDE_BIN="$c"; fi
+done
+if [[ -z "$CLAUDE_BIN" ]]; then
+  read -r -p "Claude Code isn't installed. Install it now? [y/N] " A || A=""
+  if [[ "$A" =~ ^[Yy] ]]; then
+    curl -fsSL https://claude.ai/install.sh | bash || echo "Claude Code didn't install; m5e uses its free editor."
+    [[ -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
   else
-    echo "Skipped: m5e will use its rule-based editor until you add a key (run this again any time)."
+    echo "Skipped: m5e uses its free editor (run this again any time to add Claude)."
   fi
+fi
+if [[ -n "$CLAUDE_BIN" ]]; then
+  export PATH="$(dirname "$CLAUDE_BIN"):$PATH"
+  if ! .venv/bin/python -c "import sys; from m5e import brain; ok, why = brain.login(); print(why); sys.exit(0 if ok else 1)"; then
+    echo "Log in with the Claude account that has your Max plan (a browser window opens):"
+    env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$CLAUDE_BIN" auth login --claudeai \
+      || echo "Login skipped: run 'claude auth login' any time."
+    .venv/bin/python -c "import sys; from m5e import brain; ok, why = brain.login(force=True); print(why)" || true
+  fi
+  echo
+  echo "To be sure nothing is ever billed beyond your plan, keep 'extra usage' (usage credits) switched OFF at"
+  echo "https://claude.ai/settings/usage - m5e never uses it either way, and stops at your plan's limit."
 fi
 
 bold "Done. To edit a reel: double-click m5e.command and choose the folder with your clips and vo.m4a."

@@ -71,14 +71,16 @@ def beats(words: list[dict], pause: float = 0.35) -> list[dict]:
 
 def scenes(clips: dict[str, dict], cands: list[dict], notes: dict, gap_s: float = 300.0) -> list[dict]:
     """Group clips into scenes: a new scene starts after a gap in recording time (default 5 min) or when
-    the AI says the setting changed. Clips arrive sorted by recording time."""
+    Claude's shot log says the setting changed. Clips arrive sorted by recording time."""
     order = list(clips.keys())
     by_clip: dict[str, list[dict]] = {}
     for c in cands:
         by_clip.setdefault(c["clip"], []).append(c)
 
     def setting(cid):
-        s = Counter(notes.get(c["id"], {}).get("setting", "").strip().lower() for c in by_clip.get(cid, []))
+        # only Claude's settings split scenes: the free local model's per-shot guesses are too noisy for that
+        s = Counter(notes.get(c["id"], {}).get("setting", "").strip().lower() for c in by_clip.get(cid, [])
+                    if notes.get(c["id"], {}).get("_source") != "local")
         s.pop("", None)
         return s.most_common(1)[0][0] if s else ""
 
@@ -107,7 +109,7 @@ def scenes(clips: dict[str, dict], cands: list[dict], notes: dict, gap_s: float 
             for c in by_clip.get(cid, []):
                 n = notes.get(c["id"], {})
                 tags.update(t.lower() for t in n.get("tags", []))
-                if n.get("setting"):
+                if n.get("setting") and n.get("_source") != "local":
                     label[n["setting"]] += 1
         out.append({"id": f"S{k + 1}", "clips": g, "label": label.most_common(1)[0][0] if label else f"scene {k + 1}",
                     "tags": [t for t, _ in tags.most_common(25)],
@@ -121,9 +123,10 @@ def _different_place(a: str, b: str) -> bool:
     return not (wa & wb)
 
 
-def align(bts: list[dict], scs: list[dict], vo_dur: float, notes: dict, cands: list[dict]) -> list[int]:
+def align(bts: list[dict], scs: list[dict], vo_dur: float, notes: dict, cands: list[dict], sem=None) -> list[int]:
     """Monotonic beat -> scene alignment (dynamic programming). Cost = distance from the proportional
-    position in the day + a bonus when the beat's words match the scene's tags/log."""
+    position in the day + a bonus when the beat's words match the scene's tags/log + a bonus when the
+    local vision model sees the line in that scene's shots (sem: (beat index, shot id) -> z-score)."""
     if not scs:
         return [0] * len(bts)
     S, B = len(scs), len(bts)
@@ -146,6 +149,10 @@ def align(bts: list[dict], scs: list[dict], vo_dur: float, notes: dict, cands: l
         for j in range(S):
             match = len(set(b["keys"]) & scene_words[j])
             cost[i, j] = abs(pos - centers[j]) * 2.0 - 0.6 * min(match, 3)
+            if sem:
+                zs = sorted((sem.get((i, x), 0.0) for x in scs[j]["shots"]), reverse=True)[:2]
+                if zs:
+                    cost[i, j] -= 0.25 * float(np.clip(np.mean(zs), -1.0, 3.0))
     # DP: scene index never goes backwards (the hook beat is free to borrow from anywhere later)
     INF = 1e9
     dp = np.full((B, S), INF)

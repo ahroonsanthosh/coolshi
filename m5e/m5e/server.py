@@ -74,12 +74,14 @@ class Session:
         cands = []
         if p is not None:
             used = {s.get("shot") for s in st.get("timeline", [])} | {s.get("v_clip") for s in st.get("timeline", [])}
+            notes = getattr(p, "notes", None) or {}
             for c in p.cands:
-                n = st.get("notes", {}).get(c["id"], {})
+                n = notes.get(c["id"]) or st.get("notes", {}).get(c["id"], {})
                 cands.append({**{k: c[k] for k in ("id", "clip", "start", "end", "dur", "score", "flags", "focus", "face")},
                               "file": Path(p.clips[c["clip"]]["path"]).name, "note": n.get("what", ""),
                               "type": n.get("shot_type", ""), "focus_ok": n.get("focus_ok", True),
-                              "filler": n.get("filler", False), "used": c["id"] in used})
+                              "filler": n.get("filler", False), "used": c["id"] in used,
+                              "source": n.get("_source", "")})
         rejected = []
         if p is not None:
             for cid, info in p.clips.items():
@@ -93,7 +95,7 @@ class Session:
         for i, s in enumerate(st.get("timeline", [])):
             t0, t1 = s.get("f0", 0) / 30, (s.get("f0", 0) + s.get("frames", 0)) / 30
             said = " ".join(w["w"] for w in words if t0 - 0.05 <= w["s"] < t1 - 0.05)
-            n = st.get("notes", {}).get(s.get("shot") or "", {})
+            n = (getattr(p, "notes", None) or {}).get(s.get("shot") or "") or st.get("notes", {}).get(s.get("shot") or "", {})
             timeline.append({"i": i, "t0": round(t0, 2), "t1": round(t1, 2), "shot": s.get("shot"), "clip": s["clip"],
                              "why": s.get("why", ""), "said": said, "note": n.get("what", "")})
         cfg = p.cfg if p is not None else {}
@@ -102,6 +104,7 @@ class Session:
                 "video": f"/files/{OUT}/{videos[0].name}?v={int(videos[0].stat().st_mtime)}" if videos else None,
                 "warnings": st.get("warnings", []), "reviews": st.get("reviews", []), "ai": st.get("ai_notes", {}),
                 "quality": st.get("quality"), "sfx": st.get("sfx", []),
+                "directed_by": st.get("directed_by"), "understood_by": st.get("understood_by", {}),
                 "brief": cfg.get("brief", ""), "pace": p._user_cfg.get("pace") if p is not None else None,
                 "mode": getattr(p, "mode", None),
                 "captions_mtime": cap}

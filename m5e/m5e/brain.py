@@ -1,95 +1,473 @@
-"""The AI editor. Claude looks at every candidate shot, plans the cut against the voiceover,
-then watches the render and sends back fixes.
+"""The AI editor: Claude logs every shot, plans the cut against the voiceover and watches the render.
 
-Needs an Anthropic API key (ANTHROPIC_API_KEY, or `ant auth login`). Without one, m5e falls
-back to the rule-based editor in plan.py.
+m5e reaches Claude only through Claude Code logged in with your Claude subscription (Pro/Max), so the AI steps
+run on your plan's included usage and never on pay-per-token API billing:
+  - API keys, auth tokens, custom endpoints and cloud-provider switches are removed from Claude Code's
+    environment, and its settings files are ignored, so the only way in is your claude.ai login;
+  - before the first request, `claude auth status` has to say you're logged in with a Claude subscription,
+    and every request's start-up message has to say no API key is in use;
+  - the moment Claude Code reports a usage limit, or that it would start drawing on usage credits / extra
+    usage, m5e ends that request and doesn't call Claude again until the limit resets (remembered in
+    ~/.m5e/claude_limit.json). The edit carries on with the free local editor (see.py + director.py).
+Without Claude Code, or without a subscription login, everything runs on the free local editor.
 """
 from __future__ import annotations
 
 import base64
+import json
 import os
+import queue
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .style import BURST, HOUSE_RULES, MAX_SHOT, MIN_SHOT, PLAYBOOK, SFX_RULES
 
-MODEL = os.environ.get("M5E_MODEL", "claude-opus-5-5")
-BATCH = 15  # candidate strips per "look at these shots" request
+EDIT_MODEL = os.environ.get("M5E_MODEL", "opus")         # directing and reviewing (a Claude Code model alias)
+LOG_MODEL = os.environ.get("M5E_LOG_MODEL", "sonnet")    # logging shots: many images, so the lighter model
+BATCH = 15            # candidate strips per "look at these shots" request
+STATE_DIR = Path.home() / ".m5e"
+LIMIT_FILE = STATE_DIR / "claude_limit.json"
+log = print           # project.py points this at its own log
+
+
+def _env_on() -> bool:
+    return os.environ.get("M5E_CLAUDE", "on").strip().lower() not in ("0", "off", "false", "no")
+
+
+enabled = _env_on()
+
+
+def configure(on: bool = True, log_fn=None) -> None:
+    """Per folder: "claude": false in m5e.json (or M5E_CLAUDE=off, or --no-claude) keeps m5e fully local."""
+    global enabled, log
+    enabled = bool(on) and _env_on()
+    if log_fn is not None:
+        log = log_fn
 
 
 class BrainError(RuntimeError):
     pass
 
 
-KEY_FILE = Path.home() / ".m5e" / "anthropic_key"   # written by install.command / install.bat
+class LimitHit(BrainError):
+    """Claude Code reported a usage limit, or that it would start using paid usage credits."""
 
 
-def _load_saved_key() -> None:
-    """Use the key the installer saved, unless one is already set in the environment."""
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return
+# How Claude Code words its limit notices and its "now using paid credits" notices (taken from its own code),
+# plus the older wording "Claude AI usage limit reached|<reset time>".
+_LIMIT_START = ("You've hit your", "You've reached your", "You're out of usage credits", "Your org is out of usage",
+                "Your seat type doesn't include", "Your usage allocation has been disabled",
+                "Your group's usage limit", "You're out of extra usage")
+_PAID_START = ("You're now using usage credits", "You're now using your usage allocation",
+               "Now using your usage allocation", "Now using usage credits", "Now using credits",
+               "You're now using extra usage", "Now using extra usage")
+_LIMIT_RE = re.compile(r"usage limit reached|hit your [\w' -]{0,40}limit|requires usage credits|out of (extra )?usage|"
+                       r"spend limit|reached your [\w' -]{0,40}limit", re.I)
+_FAMILIES = ("opus", "sonnet", "haiku", "fable")
+
+
+def _is_limit(text: str) -> bool:
+    t = (text or "").strip()
+    return t.startswith(_LIMIT_START + _PAID_START) or bool(_LIMIT_RE.search(t))
+
+
+def _family(model: str) -> str:
+    return next((f for f in _FAMILIES if f in model.lower()), model.lower())
+
+
+# ------------------------------------------------------------------------------------------- limits
+
+_session: dict[str, dict] = {}     # limits seen by this process: scope ("*" or a model family) -> {until, why}
+
+
+def _blocks() -> dict[str, dict]:
+    """Limits still in force: from this run and from earlier runs (until they reset)."""
+    now = time.time()
     try:
-        key = KEY_FILE.read_text(encoding="utf-8").strip()
+        saved = json.loads(LIMIT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    out = {k: v for k, v in saved.items() if isinstance(v, dict) and float(v.get("until", 0)) > now}
+    out.update({k: v for k, v in _session.items() if v["until"] > now})
+    return out
+
+
+def _block(scope: str, why: str, until: float | None) -> None:
+    until = float(until) if until and float(until) > time.time() else time.time() + 3600
+    _session[scope] = {"until": until, "why": why}
+    try:
+        saved = json.loads(LIMIT_FILE.read_text(encoding="utf-8")) if LIMIT_FILE.exists() else {}
+    except (OSError, ValueError):
+        saved = {}
+    saved = {k: v for k, v in saved.items() if isinstance(v, dict) and float(v.get("until", 0)) > time.time()}
+    saved[scope] = {"until": until, "why": why}
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        LIMIT_FILE.write_text(json.dumps(saved, indent=1), encoding="utf-8")
     except OSError:
-        return
-    if key:
-        os.environ["ANTHROPIC_API_KEY"] = key
+        pass
+
+
+def _until_text(b: dict) -> str:
+    return time.strftime("%H:%M on %a %d %b", time.localtime(b["until"]))
+
+
+_LIMIT_NAMES = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus",
+                "seven_day_sonnet": "weekly Sonnet", "overage": "usage-credit"}
+
+
+def _limit_name(info: dict) -> str:
+    kind = str(info.get("rateLimitType") or "")
+    return _LIMIT_NAMES.get(kind, kind.replace("_", " "))
+
+
+def _hit(info: dict, why: str, model: str):
+    """Claude Code says a limit is reached (or paid usage would start): stop using Claude until it resets."""
+    paid = bool(info.get("isUsingOverage")) or (why or "").strip().startswith(_PAID_START)
+    kind = str(info.get("rateLimitType") or "")
+    m = re.search(r"\b(Opus|Sonnet|Haiku|Fable)\b[^.\n]{0,30}\b(limit|requires usage credits)", why or "")
+    scope = "*"
+    if not paid:
+        scope = next((f for f in _FAMILIES if f in kind.lower()), None) or (m.group(1).lower() if m else "*")
+    until = info.get("resetsAt") or info.get("resets_at")
+    old = re.search(r"\|(\d{9,})", why or "")
+    if not until and old:
+        until = int(old.group(1))
+    if paid:
+        why = ("your plan's included usage is used up and Claude Code would start using paid usage credits, so m5e "
+               "stopped")
+    _block(scope, (why or "usage limit reached").strip(), until)
+    raise LimitHit(why)
+
+
+def _extra_usage_on(info: dict) -> bool:
+    return info.get("overageStatus") in ("allowed", "allowed_warning") and not info.get("overageDisabledReason")
+
+
+def _model_for(preferred: str) -> str:
+    """The model to use: the preferred one, or the other included one when only the preferred model's own limit
+    is reached. Raises LimitHit when Claude is at its limit."""
+    b = _blocks()
+    if "*" in b:
+        raise LimitHit(f"{b['*']['why']} (m5e uses Claude again after {_until_text(b['*'])})")
+    if _family(preferred) not in b:
+        return preferred
+    for alt in ("opus", "sonnet"):
+        if alt not in b:
+            log(f"  Claude: the {_family(preferred)} limit on your plan is reached; using {alt} (still your plan)")
+            return alt
+    first = min(b.values(), key=lambda v: v["until"])
+    raise LimitHit(f"{first['why']} (m5e uses Claude again after {_until_text(first)})")
+
+
+# ------------------------------------------------------------------------------------------- Claude Code
+
+def _exe() -> str | None:
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = Path.home()
+    for c in (home / ".local" / "bin" / "claude", home / ".claude" / "local" / "claude",
+              Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude"),
+              home / ".local" / "bin" / "claude.exe", home / "AppData" / "Roaming" / "npm" / "claude.cmd"):
+        if c.exists():
+            return str(c)
+    return None
+
+
+def _env() -> dict:
+    """Claude Code's environment with every way to bill per token removed: API keys, auth tokens, custom
+    endpoints and gateways (all ANTHROPIC_*), cloud-provider switches, and anything left over from another
+    Claude Code session (all other CLAUDE* variables). Your claude.ai login (or a subscription token from
+    `claude setup-token`) is what's left."""
+    keep = ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_GIT_BASH_PATH")
+    return {k: v for k, v in os.environ.items()
+            if not (k.startswith("ANTHROPIC_") or k == "AWS_BEARER_TOKEN_BEDROCK"
+                    or (k.startswith("CLAUDE") and k not in keep))}
+
+
+_flag_cache: dict[str, set] = {}
+
+
+def _flags(exe: str) -> set[str]:
+    """The options this Claude Code version understands (so m5e works with older and newer versions)."""
+    if exe not in _flag_cache:
+        try:
+            out = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=60, env=_env(),
+                                 encoding="utf-8", errors="replace").stdout
+        except (OSError, subprocess.TimeoutExpired):
+            out = ""
+        _flag_cache[exe] = set(re.findall(r"(--[a-z][a-z-]+)", out))
+    return _flag_cache[exe]
+
+
+_login = {"t": 0.0, "ok": False, "why": "not checked"}
+
+
+def _check_login() -> tuple[bool, str]:
+    exe = _exe()
+    if not exe:
+        return False, "Claude Code isn't installed"
+    try:
+        r = subprocess.run([exe, "auth", "status", "--json"], capture_output=True, text=True, timeout=90,
+                           env=_env(), cwd=tempfile.gettempdir(), encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"couldn't run Claude Code ({e})"
+    out = r.stdout or ""
+    try:
+        st = json.loads(out[out.index("{"):])
+    except ValueError:
+        return False, "this Claude Code is too old to report its login (update it: claude update)"
+    if not st.get("loggedIn"):
+        return False, "Claude Code isn't logged in (run: claude auth login)"
+    if st.get("authMethod") not in ("claude.ai", "oauth_token") or st.get("apiKeySource") \
+            or st.get("apiProvider", "firstParty") != "firstParty":
+        return False, ("Claude Code is set up with an API key, gateway or cloud provider, which bills per token; m5e "
+                       "only uses a Claude subscription login (run: claude auth login --claudeai)")
+    return True, f"your Claude {st.get('subscriptionType') or 'subscription'} plan"
+
+
+def login(force: bool = False) -> tuple[bool, str]:
+    """(ok, what): is Claude Code installed and logged in with a Claude subscription? Checked every few minutes."""
+    if force or time.time() - _login["t"] > 300:
+        ok, why = _check_login()
+        _login.update(t=time.time(), ok=ok, why=why)
+    return _login["ok"], _login["why"]
 
 
 def available() -> bool:
-    import importlib.util
-    if importlib.util.find_spec("anthropic") is None:
+    if not enabled:
         return False
-    _load_saved_key()
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return True
-    return (Path.home() / ".config" / "anthropic").exists()
+    b = _blocks()
+    if "*" in b or all(f in b for f in ("opus", "sonnet")):
+        return False
+    return login()[0]
 
 
-_client = None
+def status() -> str:
+    """One line for the log: is Claude helping with this edit, and if not, why not."""
+    if not enabled:
+        return "Claude is switched off for this folder (\"claude\": false); using the free local editor"
+    b = _blocks()
+    if "*" in b:
+        return (f"Claude isn't used until {_until_text(b['*'])}: {b['*']['why']}. Using the free local editor")
+    ok, why = login()
+    if not ok:
+        return f"Claude isn't used ({why}); using the free local editor"
+    return f"Claude helps with this edit on {why} (it stops when the plan's usage limit is reached)"
 
 
-def _client_():
-    global _client
-    if _client is None:
-        import anthropic
-        _load_saved_key()
-        _client = anthropic.Anthropic(max_retries=4, timeout=600)
-    return _client
+def _inline(schema: dict) -> dict:
+    """Pydantic's JSON schema with every $ref replaced by its definition (simplest form for structured output)."""
+    defs = schema.get("$defs", {})
+
+    def walk(x):
+        if isinstance(x, dict):
+            if "$ref" in x:
+                return walk(defs[x["$ref"].split("/")[-1]])
+            return {k: walk(v) for k, v in x.items() if k != "$defs"}
+        if isinstance(x, list):
+            return [walk(v) for v in x]
+        return x
+    return walk(schema)
 
 
-def _ask(content: list, schema: type[BaseModel], system: str, effort: str = "high", max_tokens: int = 16000):
-    import anthropic
+def _text(message) -> str:
+    if not isinstance(message, dict):
+        return ""
+    parts = message.get("content") or []
+    if isinstance(parts, str):
+        return parts
+    return " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text").strip()
+
+
+_warned: set = set()
+
+
+def _watch(ev: dict, model: str) -> None:
+    """Look at one line of Claude Code's output for anything that means: stop."""
+    t = ev.get("type")
+    if t == "system" and ev.get("subtype") == "init":
+        if ev.get("apiKeySource") not in (None, "none"):
+            _login.update(t=time.time(), ok=False, why="Claude Code started with an API key (pay per token)")
+            raise BrainError("Claude Code started with an API key (billed per token), so m5e stopped it; m5e only "
+                             "uses your Claude subscription login")
+    elif t == "rate_limit_event":
+        info = ev.get("rate_limit_info") or {}
+        name = _limit_name(info) or "usage"
+        if info.get("isUsingOverage"):
+            _hit(info, "", model)
+        if info.get("status") == "rejected":
+            _hit(info, f"You've hit your plan's {name} limit", model)
+        if _extra_usage_on(info) and "extra" not in _warned:
+            _warned.add("extra")
+            log("  Claude: extra usage (usage credits) is switched on for your account. m5e never uses it, but to "
+                "be certain nothing is ever billed, switch it off at claude.ai -> Settings -> Usage.")
+        if info.get("status") == "allowed_warning":
+            u = info.get("utilization")
+            used = f"{float(u) * 100:.0f}% of" if u is not None else "most of"
+            if _extra_usage_on(info):
+                # Claude Code only says it used paid credits after that request has run, so with extra usage
+                # switched on m5e stops here, at the warning, instead of finding out from the bill
+                _block("*", f"{used} your plan's {name} limit is used and extra usage is switched on, so m5e "
+                            f"stopped early to make sure nothing is billed", info.get("resetsAt"))
+                log(f"  Claude: {used} your plan's {name} limit used and extra usage is on: m5e stops using Claude "
+                    f"now so nothing is billed (switch extra usage off to let m5e use the rest of your plan)")
+            elif (name, int(float(u or 0) * 20)) not in _warned:
+                _warned.add((name, int(float(u or 0) * 20)))
+                log(f"  Claude: {used} your plan's {name} limit used; m5e stops using Claude when it's reached")
+    elif t == "system":
+        for v in ev.values():
+            if isinstance(v, str) and v.strip().startswith(_PAID_START):
+                _hit({}, v, model)
+    elif t == "assistant" and ev.get("error"):
+        text = _text(ev.get("message"))
+        if ev["error"] in ("rate_limit", "billing_error") or _is_limit(text):
+            _hit({}, text or "Claude Code reported a usage limit", model)
+        if ev["error"] in ("authentication_failed", "oauth_org_not_allowed", "account_on_hold"):
+            _login.update(t=time.time(), ok=False, why=text or ev["error"])
+        raise BrainError(f"Claude Code: {text or ev['error']}")
+    elif t == "result" and ev.get("is_error"):
+        text = str(ev.get("result") or ev.get("subtype") or "")
+        if _is_limit(text):
+            _hit({}, text, model)
+        raise BrainError(f"Claude Code: {text[:300]}")
+
+
+def _run(cmd: list[str], content: list, cwd: str, timeout: float, model: str) -> dict:
+    """Start Claude Code, send the request, watch its output line by line; returns the final result message."""
+    msg = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
     try:
-        resp = _client_().beta.messages.parse(
-            model=MODEL,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": content}],
-            output_format=schema,
-            output_config={"effort": effort},
-            # if a request is ever declined by a safety classifier, re-run it on Anthropic's
-            # recommended fallback model instead of failing the edit
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
-    except anthropic.AuthenticationError as e:
-        raise BrainError("Anthropic API key missing or invalid (set ANTHROPIC_API_KEY).") from e
-    except anthropic.RateLimitError as e:
-        raise BrainError("Rate limited by the Anthropic API even after retries; try again in a minute.") from e
-    except anthropic.APIStatusError as e:
-        raise BrainError(f"Anthropic API error {e.status_code}: {e.message}") from e
-    except anthropic.APIConnectionError as e:
-        raise BrainError("Could not reach the Anthropic API (network).") from e
-    if resp.stop_reason == "refusal":
-        raise BrainError("The request was declined by the model.")
-    if resp.stop_reason == "max_tokens":
-        raise BrainError("The model ran out of output space; try fewer clips.")
-    if resp.parsed_output is None:
-        raise BrainError("The model returned no usable answer.")
-    return resp.parsed_output
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd,
+                                env=_env(), text=True, encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise BrainError(f"couldn't start Claude Code ({e})") from e
+    lines: queue.Queue = queue.Queue()
+    err: list[str] = []
+
+    def feed():
+        try:
+            proc.stdin.write(msg)
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    def read():
+        for ln in proc.stdout:
+            lines.put(ln)
+        lines.put(None)
+
+    def drain():
+        for ln in proc.stderr:
+            err.append(ln)
+
+    workers = [threading.Thread(target=f, daemon=True) for f in (feed, read, drain)]
+    for w in workers:
+        w.start()
+    deadline = time.monotonic() + timeout
+    result = None
+    try:
+        while True:
+            try:
+                ln = lines.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                raise BrainError(f"Claude took longer than {timeout / 60:.0f} minutes, so m5e skipped this step")
+            if ln is None:
+                break
+            try:
+                ev = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(ev, dict):
+                _watch(ev, model)
+                if ev.get("type") == "result":
+                    result = ev
+                    break
+    finally:
+        if result is None and proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        for w in workers[1:]:
+            w.join(timeout=5)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    if result is None:
+        tail = "".join(err)[-800:]
+        if _is_limit(tail):
+            _hit({}, tail.strip().splitlines()[-1], model)
+        if re.search(r"not logged in|please run /login|invalid api key|oauth token", tail, re.I):
+            _login.update(t=time.time(), ok=False, why="Claude Code isn't logged in (run: claude auth login)")
+            raise BrainError("Claude Code isn't logged in (run: claude auth login)")
+        raise BrainError(f"Claude Code stopped without an answer: {tail.strip()[-300:] or 'no output'}")
+    return result
+
+
+def _ask(content: list, schema: type[BaseModel], system: str, model: str = EDIT_MODEL, effort: str = "high",
+         timeout: float = 1500.0):
+    """One request to Claude through Claude Code (your subscription); the answer is validated against schema."""
+    if not enabled:
+        raise BrainError("Claude is switched off")
+    ok, why = login()
+    if not ok:
+        raise BrainError(why)
+    for attempt in range(2):
+        use = _model_for(model)
+        try:
+            return _ask_once(content, schema, system, use, effort, timeout)
+        except LimitHit:
+            b = _blocks()
+            if attempt or "*" in b or _family(use) not in b:
+                raise
+            # only that model's own limit: _model_for picks the other included model
+
+
+def _ask_once(content: list, schema: type[BaseModel], system: str, model: str, effort: str, timeout: float):
+    exe = _exe()
+    flags = _flags(exe)
+    with tempfile.TemporaryDirectory(prefix="m5e-claude-") as tmp:
+        cmd = [exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+               "--model", model, "--json-schema", json.dumps(_inline(schema.model_json_schema())),
+               "--max-turns", "4"]
+        if "--system-prompt-file" in flags:
+            sp = Path(tmp) / "system.md"
+            sp.write_text(system, encoding="utf-8")
+            cmd += ["--system-prompt-file", str(sp)]
+        else:
+            cmd += ["--system-prompt", system]
+        if "--effort" in flags:
+            cmd += ["--effort", effort]
+        if "--tools" in flags:
+            cmd += ["--tools", ""]                      # no tools: it only looks and answers
+        for f in ("--restricted", "--safe-mode", "--strict-mcp-config", "--no-session-persistence"):
+            if f in flags:
+                cmd.append(f)                           # ignore settings files, hooks, plugins, MCP servers
+        res = _run(cmd, content, tmp, timeout, model)
+    out = res.get("structured_output")
+    if out is None:
+        text = str(res.get("result") or "")
+        try:
+            out = json.loads(text[text.index("{"):text.rindex("}") + 1])
+        except ValueError:
+            raise BrainError("Claude gave no usable answer") from None
+    try:
+        return schema.model_validate(out)
+    except ValidationError as e:
+        raise BrainError(f"Claude's answer didn't fit the expected shape ({e.error_count()} problems)") from e
 
 
 def _img(path: Path) -> dict:
@@ -134,7 +512,10 @@ is false. Mark filler honestly (corridors, floors, car seats, blurry transitions
 happening). Tags should be the words a person would naturally say about this shot."""
 
 
-def describe(cands: list[dict], strip_dir: Path, clip_order: dict[str, int], context: str = "") -> dict[str, dict]:
+def describe(cands: list[dict], strip_dir: Path, clip_order: dict[str, int], context: str = "",
+             on_notes=None) -> dict[str, dict]:
+    """Log every shot, BATCH at a time. on_notes(batch_notes) is called after each batch, so what was logged is
+    kept even if a usage limit stops the rest."""
     notes: dict[str, dict] = {}
     for i in range(0, len(cands), BATCH):
         batch = cands[i:i + BATCH]
@@ -148,28 +529,17 @@ def describe(cands: list[dict], strip_dir: Path, clip_order: dict[str, int], con
                 f"{c.get('faces', 0)} face(s), largest {c['face']:.2f} of frame height{', flags: ' + ', '.join(c['flags']) if c['flags'] else ''}.")})
             content.append(_img(strip_dir / f"{c['id']}.jpg"))
         content.append({"type": "text", "text": f"Log all {len(batch)} shots above, using their ids."})
-        out = _ask(content, ShotNotes, DESCRIBE_SYSTEM, effort="medium")
-        for n in out.shots:
-            notes[n.id] = n.model_dump()
+        out = _ask(content, ShotNotes, DESCRIBE_SYSTEM, model=LOG_MODEL, effort="medium", timeout=900)
+        got = {n.id: n.model_dump() for n in out.shots if n.id in {c["id"] for c in batch}}
+        notes.update(got)
+        if on_notes:
+            on_notes(got)
     return notes
 
 
 # --------------------------------------------------------------------------------------------
 # 2. Plan the edit
 # --------------------------------------------------------------------------------------------
-
-class VOSeg(BaseModel):
-    from_word: int     # index of the voiceover word this shot starts on
-    shot: str          # candidate id
-    offset: float      # seconds into the candidate where the shot begins
-    why: str           # short reason (what in the VO it matches / why it's here)
-
-
-class VOPlan(BaseModel):
-    segments: list[VOSeg]
-    hook_note: str      # how the first second grabs attention
-    vo_feedback: str    # honest note on the voiceover itself (hook strength, flat ending) — the editor can't fix the script
-
 
 class DirCut(BaseModel):
     from_word: int     # the voiceover word this shot starts on (the picture lands with it)
@@ -250,24 +620,6 @@ def _shot_table(cands: list[dict], notes: dict[str, dict], clip_order: dict[str,
     return "\n".join(rows)
 
 
-def plan_vo(words: list[dict], vo_dur: float, cands, notes, clip_order, pace: float, banned=(), must=(),
-            revision_notes: str = "", brief: str = "", style_ref: str = "") -> VOPlan:
-    wl = " ".join(f"{i}:{w['w']}@{w['s']:.2f}" for i, w in enumerate(words))
-    text = (f"VOICEOVER ({vo_dur:.1f}s), as index:word@start-seconds:\n{wl}\n\n"
-            f"A shot that starts on word i runs until the next shot's start word (the last one runs to {vo_dur:.1f}s).\n"
-            f"Target average shot length: {pace:.1f}s (about {max(1, round(vo_dur / pace))} shots).\n\n"
-            f"SHOT LIST (id | shooting order | usable length | measurements | log):\n"
-            f"{_shot_table(cands, notes, clip_order, set(banned), set(must))}\n")
-    if brief:
-        text += f"\nBRIEF FROM THE CREATOR: {brief}\n"
-    if style_ref:
-        text += f"\n{style_ref}\n"
-    if revision_notes:
-        text += f"\nREVIEW OF YOUR PREVIOUS CUT — fix every point:\n{revision_notes}\n"
-    text += "\nReturn the full cut: segments ordered by from_word, the first starting at word 0."
-    return _ask([{"type": "text", "text": text}], VOPlan, PLAN_SYSTEM, effort="high")
-
-
 def plan_talk(utterances: list[dict], cands, notes, clip_order, target_len: float, banned=(), must=(),
               revision_notes: str = "", brief: str = "", style_ref: str = "") -> TalkPlan:
     ul = "\n".join(f"{u['clip']} {u['start']:.2f}-{u['end']:.2f}s: \"{u['text']}\"" for u in utterances)
@@ -331,7 +683,7 @@ def direct_vo(words, vo_dur, beats, scenes, beat_scene, cands, notes, clip_order
     if revision_notes:
         text += f"\nREVIEW OF YOUR PREVIOUS CUT - fix every point:\n{revision_notes}\n"
     text += "\nReturn the full edit: story, cuts, bursts, sfx, and notes."
-    return _ask([{"type": "text", "text": text}], DirectorPlan, DIRECTOR_SYSTEM, effort="high", max_tokens=32000)
+    return _ask([{"type": "text", "text": text}], DirectorPlan, DIRECTOR_SYSTEM, effort="high")
 
 
 # --------------------------------------------------------------------------------------------
@@ -409,4 +761,4 @@ def study_reference(sheet: Path, rhythm: dict, transcript: str) -> RefProfile:
         _img(sheet),
         {"type": "text", "text": "Break down how this reel is edited."},
     ]
-    return _ask(content, RefProfile, REF_SYSTEM, effort="medium")
+    return _ask(content, RefProfile, REF_SYSTEM, model=LOG_MODEL, effort="medium", timeout=600)

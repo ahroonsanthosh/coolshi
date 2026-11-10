@@ -59,7 +59,7 @@
     <section>
       <h2>The reel</h2>
       <video id="video" controls playsinline></video>
-      <label for="brief">Brief for the AI editor (optional)</label>
+      <label for="brief">Brief for Claude (optional - used when Claude directs the cut)</label>
       <textarea id="brief" rows="3" placeholder="e.g. open on the pitch result, keep it under 35s, end on the group photo"></textarea>
       <label for="pace">Force an average shot length (seconds) - leave empty to cut with your editing profile's rhythm</label>
       <input id="pace" type="number" step="0.1" min="0.6" max="3" placeholder="your profile's rhythm">
@@ -117,6 +117,9 @@ function render() {
   if (document.activeElement !== $("pace") && !dirty) $("pace").value = S.pace ?? "";
   $("warnings").innerHTML = (S.warnings||[]).map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
   const ai = [];
+  if (S.directed_by) { const u = S.understood_by || {};
+    const who = [u.claude ? `Claude (${u.claude})` : "", u.local ? `the free local model (${u.local})` : ""].filter(Boolean).join(", ");
+    ai.push(`<p><b>Cut by:</b> ${esc(S.directed_by)}${who ? " · shots logged by " + esc(who) : ""}</p>`); }
   if (S.ai && S.ai.story) ai.push(`<p><b>Story:</b> ${esc(S.ai.story)}</p>`);
   if (S.ai && S.ai.hook) ai.push(`<p><b>Hook:</b> ${esc(S.ai.hook)}</p>`);
   if (S.ai && S.ai.ending) ai.push(`<p><b>Ending:</b> ${esc(S.ai.ending)}</p>`);
@@ -149,7 +152,7 @@ function render() {
     return !q || (c.id+" "+c.file+" "+c.note+" "+c.type).toLowerCase().includes(q);
   });
   $("grid").innerHTML = list.map(c => {
-    const flags = [...c.flags]; if (!c.focus_ok) flags.push("AI: soft focus"); if (c.filler) flags.push("AI: filler");
+    const flags = [...c.flags]; if (!c.focus_ok) flags.push("soft focus (Claude)"); if (c.filler) flags.push("filler");
     return `<div class="card ${c.used?"used":""} ${ban.has(c.id)?"banned":""}">
       <img src="/files/m5e_project/strips/${esc(c.id)}.jpg" loading="lazy" alt="">
       <div class="body">
