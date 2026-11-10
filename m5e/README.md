@@ -60,20 +60,23 @@ m5e runs **on your laptop**, not on a server. A day of Pocket 4P 3K footage is s
 take longer than the edit, and decoding 3K HEVC, speech-to-text and rendering need a real CPU. Your laptop already
 has the footage and DaVinci.
 
-1. Download the code: on GitHub, open the repo, switch to the branch, press **Code -> Download ZIP**, and unzip
-   it. Or with git:
+**Mac (easiest):** open Terminal (⌘+Space, type Terminal, Enter), paste this and press Enter. It downloads m5e
+into your home folder and starts the installer:
 
 ```bash
-git clone -b claude/funny-davinci-fwx5ce https://github.com/ahroonsanthosh/coolshi.git
+cd ~ && curl -fL -o m5e-download.zip https://github.com/ahroonsanthosh/coolshi/archive/refs/heads/claude/funny-davinci-fwx5ce.zip && unzip -qo m5e-download.zip && rm m5e-download.zip && cd coolshi-claude-funny-davinci-fwx5ce/m5e && bash install.command
 ```
 
-2. Open the `m5e` folder inside it.
+If Homebrew (which m5e uses for ffmpeg and Python) isn't on your Mac, the installer offers to install it: answer
+**y** and type your Mac password when asked (nothing shows while you type). Run the same line again any time to
+update m5e.
 
-## Install (once)
+**Windows, or if you'd rather not use Terminal:** on GitHub, open the repo, switch to the branch, press
+**Code -> Download ZIP** and unzip it. Open the `m5e` folder inside it and double-click **`install.bat`**
+(Windows) or **`install.command`** (Mac; the first time, right-click -> **Open**, or allow it in System Settings ->
+Privacy & Security). On Windows, if it installs ffmpeg or Python, it asks you to run it once more.
 
-- **Mac:** double-click **`install.command`**. The first time, right-click -> **Open** so macOS lets it run.
-  It needs [Homebrew](https://brew.sh) and tells you if it's missing.
-- **Windows:** double-click **`install.bat`**. If it installs ffmpeg or Python, it asks you to run it once more.
+## Install (what it does)
 
 The installer sets up m5e's own Python environment (`.venv`), installs ffmpeg if needed, and downloads the
 speech-to-text and vision models (~1 GB, one time, free).

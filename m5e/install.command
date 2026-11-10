@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# m5e installer for macOS. Double-click it in Finder (first time: right-click -> Open).
+# m5e installer for macOS. Run it from Terminal (bash install.command) or double-click it in Finder.
 # Also works on Linux if python3 (3.10+) and ffmpeg are already installed: bash install.command
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -9,29 +9,49 @@ fail() { printf "\n\033[31m%s\033[0m\n" "$1"; read -r -p "Press Enter to close."
 
 bold "m5e setup"
 
+brew_env() {   # put Homebrew on this script's PATH when it's installed but not on the PATH yet
+  local b
+  for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$b" ]]; then eval "$("$b" shellenv)"; return 0; fi
+  done
+  return 0
+}
+
 if [[ "$(uname)" == "Darwin" ]]; then
+  command -v brew >/dev/null 2>&1 || brew_env
   if ! command -v brew >/dev/null 2>&1; then
-    for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [[ -x $b ]] && eval "$($b shellenv)"; done
+    bold "m5e needs Homebrew, the standard free installer for Mac tools like ffmpeg (https://brew.sh)."
+    echo "It asks for your Mac password (nothing shows while you type it - that's normal), may install Apple's"
+    echo "Command Line Tools first, and can take 5-15 minutes."
+    read -r -p "Install Homebrew now? [y/N] " A || A=""
+    if [[ "$A" =~ ^[Yy] ]]; then
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+        || fail "Homebrew didn't install (see the messages above). Run this again to retry."
+      brew_env
+      # Homebrew's own "next steps": make `brew` work in your Terminal from now on too
+      if [[ -x /opt/homebrew/bin/brew ]] && ! grep -qs 'brew shellenv' "$HOME/.zprofile"; then
+        printf '\neval "$(/opt/homebrew/bin/brew shellenv)"\n' >> "$HOME/.zprofile"
+        echo "Added Homebrew to your Terminal's PATH (in ~/.zprofile)."
+      fi
+    fi
   fi
-  if ! command -v brew >/dev/null 2>&1; then
-    fail "Homebrew is needed to install ffmpeg and Python. Install it from https://brew.sh (one command in Terminal), then double-click install.command again."
-  fi
+  command -v brew >/dev/null 2>&1 || fail "m5e needs Homebrew to install ffmpeg and Python. Run this again and answer y."
   command -v ffmpeg >/dev/null 2>&1 || { bold "Installing ffmpeg..."; brew install ffmpeg; }
 fi
 
 command -v ffmpeg >/dev/null 2>&1 || fail "ffmpeg isn't installed. Install it, then run this again."
 
-# a Python that's new enough (macOS's built-in one is too old)
+# a Python that m5e's packages support (macOS's built-in one is too old)
 PY=""
-for c in python3.13 python3.12 python3.11 python3.10 python3; do
-  if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+for c in python3.12 python3.11 python3.13 python3.10 python3; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)' 2>/dev/null; then
     PY="$c"; break
   fi
 done
 if [[ -z "$PY" && "$(uname)" == "Darwin" ]]; then
   bold "Installing Python..."; brew install python@3.12; PY="$(brew --prefix)/bin/python3.12"
 fi
-[[ -n "$PY" ]] || fail "Python 3.10 or newer is needed. Install it from https://www.python.org/downloads/ and run this again."
+[[ -n "$PY" ]] || fail "Python 3.10-3.13 is needed. Install it from https://www.python.org/downloads/ and run this again."
 
 bold "Setting up m5e's own Python environment (.venv)..."
 "$PY" -m venv .venv
@@ -61,7 +81,7 @@ if [[ -z "$CLAUDE_BIN" ]]; then
   read -r -p "Claude Code isn't installed. Install it now? [y/N] " A || A=""
   if [[ "$A" =~ ^[Yy] ]]; then
     curl -fsSL https://claude.ai/install.sh | bash || echo "Claude Code didn't install; m5e uses its free editor."
-    [[ -x "$HOME/.local/bin/claude" ]] && CLAUDE_BIN="$HOME/.local/bin/claude"
+    if [[ -x "$HOME/.local/bin/claude" ]]; then CLAUDE_BIN="$HOME/.local/bin/claude"; fi
   else
     echo "Skipped: m5e uses its free editor (run this again any time to add Claude)."
   fi
