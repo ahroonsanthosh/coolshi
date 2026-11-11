@@ -39,10 +39,13 @@ const estimator = new Estimator();
 air.quiet = (row) => estimator.quiet(row);
 air.estimate = (row) => estimator.estimate(row);
 const acdb = new AircraftDb(join(ROOT, '.cache'));
-acdb.load().then(() => {
-  air.identity = acdb;
-  console.log(`  Aircraft database: ${acdb.status}`);
-});
+air.identity = acdb; // answers nothing until loaded
+const loadAirframes = () => acdb.load()
+  .then(() => { air.fillIdentity(); console.log(`  Aircraft database: ${acdb.status}`); })
+  .catch((e) => console.warn('[airframes]', e));
+loadAirframes();
+// The database is refreshed weekly upstream; pick it up without a restart.
+setInterval(() => { if (acdb.stale) loadAirframes(); }, 6 * 3_600_000).unref();
 const sea = new SeaStore();
 const opensky = new OpenSky();
 const digitraffic = new Digitraffic();

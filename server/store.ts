@@ -107,6 +107,27 @@ export class AirStore {
     return out;
   }
 
+  /** Airframe database fields, where no feed has filled them in. */
+  private applyIdentity(row: AircraftRow) {
+    const id = this.identity?.get(row[0]);
+    if (!id) return;
+    if (MIL_ONLY_TYPES.has(id.type)) row[14] |= AF.mil;
+    if (!row[10]) row[10] = id.type;
+    if (!row[11]) row[11] = id.reg;
+    if (!row[16]) row[16] = id.desc;
+    if (!row[17]) row[17] = id.owner;
+    row[14] |= (id.mil ? AF.mil : 0) | (id.pia ? AF.pia : 0) | (id.ladd ? AF.ladd : 0);
+  }
+
+  /**
+   * Fill in identity for aircraft first seen before the database loaded.
+   * Browsers get the filled rows with each aircraft's next report, seconds
+   * away for anything still being heard.
+   */
+  fillIdentity() {
+    for (const a of this.map.values()) this.applyIdentity(a.row);
+  }
+
   ingest(r: AircraftReport, now = Date.now()): void {
     if (!isFinite(r.lat) || !isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180) return;
     if (r.posT * 1000 > now + 5000) r.posT = now / 1000; // clock skew guard
@@ -119,15 +140,7 @@ export class AirStore {
       this.map.set(r.hex, a);
       this.tomb.delete(r.hex);
       if (inMilitaryBlock(r.hex)) a.row[14] |= AF.mil;
-      const id = this.identity?.get(r.hex);
-      if (id && MIL_ONLY_TYPES.has(id.type)) a.row[14] |= AF.mil;
-      if (id) {
-        a.row[10] = id.type;
-        a.row[11] = id.reg;
-        a.row[16] = id.desc;
-        a.row[17] = id.owner;
-        a.row[14] |= (id.mil ? AF.mil : 0) | (id.pia ? AF.pia : 0) | (id.ladd ? AF.ladd : 0);
-      }
+      this.applyIdentity(a.row);
     }
     const row = a.row;
     const newer = r.posT > row[3] + 0.05;
