@@ -18,11 +18,11 @@ import { sweepGrid } from './grid.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
-import { Clouds, Metars } from './feeds/weather.ts';
+import { Clouds, Hazards, Metars } from './feeds/weather.ts';
 import { Gazetteer, News } from './feeds/news.ts';
 import { Launches, Spacecraft } from './feeds/space.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
-import { AF, SRC, type NewsPayload, type SpacePayload, type WeatherPayload, type WorldPayload } from '../shared/protocol.ts';
+import { AF, SRC, type HazardPayload, type NewsPayload, type SpacePayload, type WeatherPayload, type WorldPayload } from '../shared/protocol.ts';
 import { destination, distance, NM } from '../shared/geo.ts';
 
 const gz = promisify(gzip);
@@ -54,6 +54,7 @@ const usgs = new Usgs();
 const gdacs = new Gdacs();
 const metars = new Metars();
 const clouds = new Clouds();
+const hazards = new Hazards();
 const iss = new Iss();
 const spacecraft = new Spacecraft();
 const launches = new Launches();
@@ -260,6 +261,7 @@ every(() => 300, () => iss.poll());
 // file every five minutes, the newest satellite image time every fifteen.
 every(() => 300, async () => { if (!watching() && metars.stations.length) return 30; await metars.poll(); });
 every(() => 900, async () => { if (!watching() && clouds.time) return 30; await clouds.poll(); });
+every(() => 600, async () => { if (!watching() && hazards.status.lastOk) return 30; await hazards.poll(); });
 // Headlines keep coming whether or not anyone is watching, so the desk is
 // full when someone arrives; each feed is asked every 10 to 20 minutes.
 every(() => 2, () => news.tick());
@@ -311,6 +313,16 @@ function weatherBody(): WeatherPayload {
   return wxBody;
 }
 
+let hzBody: HazardPayload | null = null;
+function hazardBody(): HazardPayload {
+  // Drop warnings that expired since the last poll.
+  if (!hzBody || hzBody.items !== hazards.items || hzBody.items.some((h) => h.to < Date.now())) {
+    hzBody = { at: hazards.status.lastOk, items: hazards.items.filter((h) => h.to >= Date.now()) };
+    hazards.items = hzBody.items;
+  }
+  return hzBody;
+}
+
 let windCache = { t: 0, v: [] as ReturnType<typeof air.winds> };
 function windsCached() {
   if (Date.now() - windCache.t > 15_000) windCache = { t: Date.now(), v: air.winds() };
@@ -345,7 +357,7 @@ function sources() {
   for (const r of air.values()) if (r[14] & AF.est) est++;
   estimator.status.count = est;
   estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
-  return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, metars.status, clouds.status, iss.status, spacecraft.status, launches.status, news.status]
+  return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, metars.status, clouds.status, hazards.status, iss.status, spacecraft.status, launches.status, news.status]
     .map((s) => s.toJSON());
 }
 
@@ -381,6 +393,7 @@ const server = http.createServer(async (req, res) => {
     if (m) return sendJson(req, res, await shipDetail(Number(m[1])));
     if (p === '/api/winds') return sendJson(req, res, windsCached());
     if (p === '/api/weather') return sendJson(req, res, weatherBody(), true);
+    if (p === '/api/hazards') return sendJson(req, res, hazardBody(), true);
     if (p === '/api/space') {
       const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };
       return sendJson(req, res, body);

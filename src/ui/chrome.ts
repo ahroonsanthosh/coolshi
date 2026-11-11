@@ -11,9 +11,10 @@ import { silhouetteSvg } from '../map/icons.ts';
 import { altGradientCss, tempGradientCss } from '../map/colors.ts';
 import { weather } from '../state/weather.ts';
 import { toggleWatched, watchlist } from '../state/watch.ts';
+import { hazards, hazardsAt, levels, loadHazards } from '../state/hazards.ts';
 import { wxWords } from '../lib/weather.ts';
 import { WX } from '../../shared/protocol.ts';
-import { AIRPORTS, counts, flyTo, issNow, acHidden, getMap } from '../map/mapView.ts';
+import { AIRPORTS, counts, flyTo, issNow, acHidden, getMap, onRadar, playRadar, radar, stopRadar } from '../map/mapView.ts';
 import { news } from '../state/news.ts';
 import { space, countdown, SAT_KIND_LABEL } from '../state/space.ts';
 import { storyList } from './panel.ts';
@@ -120,6 +121,25 @@ export function initCaption() {
   update();
 }
 
+function initRadarCtl() {
+  const el = $('radar-ctl');
+  const draw = () => {
+    if (!app.layers.radar || !radar.time) { el.hidden = true; return; }
+    el.hidden = false;
+    const age = (Date.now() - radar.time) / 1000;
+    patch(el, `<span>Radar</span><b>${F.utc(radar.time)} UTC</b><span>${F.ago(age)}</span>
+      ${radar.playing ? `<span class="ticks" aria-hidden="true">${Array.from({ length: radar.frames }, (_, i) => `<i class="${i === radar.index ? 'on' : ''}"></i>`).join('')}</span>` : ''}
+      <button data-act="radar-play" aria-pressed="${radar.playing}">${radar.playing ? 'Stop' : 'Play 2 h'}</button>`);
+  };
+  el.addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).closest('[data-act="radar-play"]')) return;
+    if (radar.playing) stopRadar(); else playRadar();
+  });
+  onRadar(draw);
+  app.on('layers', draw);
+  setInterval(draw, 10_000);
+}
+
 // Say plainly when the picture isn't live: still connecting (a sleeping
 // free server takes about a minute to wake), sources still coming online
 // after a start, or the connection lost. Silent otherwise.
@@ -213,6 +233,11 @@ export function describe(kind: string, id: string): [string, string] | null {
     return [`${t !== null ? `${Math.round(t)}°C · ` : ''}${ap ? ap[1] || id : id}`,
       [words && words.charAt(0).toUpperCase() + words.slice(1), wind, `observed ${F.ago(Date.now() / 1000 - r[WX.t])}`].filter(Boolean).join(' · ')];
   }
+  if (kind === 'hazard') {
+    const h = hazards.items.find((x) => x.id === id);
+    if (!h) return null;
+    return [`SIGMET: ${h.label}`, `${levels(h)} · until ${F.utc(h.to)} UTC · ${h.area}`];
+  }
   if (kind === 'iss') {
     const p = issNow();
     return ['International Space Station', p ? `${F.n0(p.alt)} km up · ${F.n0(p.vel)} km/h` : 'in orbit'];
@@ -240,6 +265,7 @@ export function initStatus() {
   draw();
   setInterval(draw, 2000);
   initNotice();
+  initRadarCtl();
   const lg = $('legend');
   const drawLegend = () => {
     lg.innerHTML = `<div>Altitude</div><div class="ramp" style="background:${altGradientCss()}"></div>
@@ -268,7 +294,8 @@ const LAYER_INFO: [LayerKey, string, string, string][] = [
   ['winds', 'Winds aloft', 'Wind measured by aircraft in flight, last 10 min; arrows point downwind', 'W'],
   ['weather', 'Weather now', 'Measured at about 5,000 stations worldwide (METAR): temperature, wind, and a ring where it is raining, snowing, storming or foggy', 'C'],
   ['clouds', 'Satellite clouds', 'Infrared picture from the geostationary satellites (EUMETSAT), every 3 hours', 'V'],
-  ['radar', 'Weather radar', 'Latest rain and snow, RainViewer', 'R'],
+  ['hazards', 'Aviation hazards', 'SIGMETs in force worldwide: thunderstorms, severe turbulence and icing, volcanic ash, cyclones, mountain waves', 'Z'],
+  ['radar', 'Weather radar', 'Rain and snow over the last two hours, RainViewer', 'R'],
   ['night', 'Day and night', 'Terminator with civil, nautical and astronomical twilight', 'N'],
 ];
 
@@ -562,6 +589,7 @@ export function openAbout() {
             <kbd>W</kbd><span>Winds aloft, measured by aircraft</span>
             <kbd>C</kbd><span>Weather now, measured at stations</span>
             <kbd>V</kbd><span>Satellite clouds</span>
+            <kbd>Z</kbd><span>Aviation hazards (SIGMETs)</span>
             <kbd>R</kbd><span>Weather radar</span>
             <kbd>N</kbd><span>Day and night</span>
             <kbd>Esc</kbd><span>Close, or clear the selection</span>
@@ -672,6 +700,7 @@ export function initKeys(handlers: { index: () => void; home: () => void }) {
     else if (k === 'r' || k === 'R') app.setLayer('radar', !app.layers.radar);
     else if (k === 'c' || k === 'C') app.setLayer('weather', !app.layers.weather);
     else if (k === 'v' || k === 'V') app.setLayer('clouds', !app.layers.clouds);
+    else if (k === 'z' || k === 'Z') app.setLayer('hazards', !app.layers.hazards);
     else if (k === 'w' || k === 'W') app.setLayer('winds', !app.layers.winds);
     else if (k === 'm' || k === 'M') app.setMilOnly(!app.milOnly);
     else if (k === 'n' || k === 'N') app.setLayer('night', !app.layers.night);
@@ -928,7 +957,7 @@ export function toggleLog(force?: boolean) {
   el.hidden = !show;
   document.querySelector('[data-act="log"]')?.setAttribute('aria-pressed', String(show));
   clearInterval(logTimer);
-  if (show) { drawLog(true); logTimer = window.setInterval(() => drawLog(), 2000); }
+  if (show) { loadHazards().then(() => drawLog(true)); drawLog(true); logTimer = window.setInterval(() => { loadHazards(); drawLog(); }, 2000); }
 }
 
 function drawLog(force = false) {
@@ -955,6 +984,17 @@ function drawLog(force = false) {
       `<b>${F.altitude(r[A.alt])}</b>`, a.x, a.y, 8);
   };
   const drones = aloft.filter((a) => a.cls === 'drone');
+  // Aircraft inside a SIGMET in force, at its levels; the worst kinds first.
+  const sev = { ash: 0, storm: 1, cyclone: 1, turb: 2, ice: 3, wave: 4, dust: 5, other: 6 } as const;
+  const inHz = aloft.flatMap((a) => {
+    const alt = a.row[A.alt] ?? a.row[A.altGeom];
+    const h = alt === null ? [] : hazardsAt(a.x, a.y, alt);
+    return h.length ? [{ a, h: h.sort((x, y) => sev[x.kind] - sev[y.kind])[0] }] : [];
+  }).sort((x, y) => sev[x.h.kind] - sev[y.h.kind]);
+  const hzRow = ({ a, h }: (typeof inHz)[number]) => {
+    const r = a.row;
+    return row('air', a.id, silhouetteSvg(a.cls, 20), r[A.cs] || r[A.reg] || r[A.hex].toUpperCase(), `${h.label} · ${r[A.type] || CLASS_LABEL[a.cls]}`, `<b>${F.altitude(r[A.alt])}</b>`, a.x, a.y, 8);
+  };
   const em = aloft.filter((a) => a.row[A.flags] & AF.emergency);
   const mil = aloft.filter((a) => a.row[A.flags] & AF.mil);
   const fast = mil.filter((a) => a.cls === 'fighter');
@@ -981,6 +1021,7 @@ function drawLog(force = false) {
     <div class="drawer-list">
       ${watching.length ? sect('Watching', 'kept on this device', watching.join(''), '') : ''}
       ${em.length ? sect('Emergencies', `${em.length}`, em.map(acRow).join(''), '') : ''}
+      ${hazards.items.length ? sect('Flying through hazards', `${inHz.length} in ${hazards.items.length} SIGMETs`, inHz.slice(0, 20).map(hzRow).join(''), 'No aircraft we can see is inside a SIGMET in force at its levels.') : ''}
       ${sect('Spacecraft', `${space.sats.length ? `${space.sats.length} tracked` : 'ISS only'}`, craft.join(''), 'Orbits not loaded yet.')}
       ${sect('Next launches', 'Launch Library 2', launches.join(''), space.loaded ? 'No launches listed.' : 'Loading…')}
       ${sect('Drones aloft', `${drones.length}`, drones.slice(0, 20).map(acRow).join(''), 'No drone is broadcasting its position right now. Large military drones (Reaper, Global Hawk, Triton) appear when they transit with their transponder on.')}

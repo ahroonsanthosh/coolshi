@@ -16,6 +16,7 @@ import { silhouetteSvg } from '../map/icons.ts';
 import { altColor, tempColor } from '../map/colors.ts';
 import { weather } from '../state/weather.ts';
 import { isWatched, toggleWatched } from '../state/watch.ts';
+import { HAZARD_COLOR, hazards, hazardsAt, levels, loadHazards } from '../state/hazards.ts';
 import { humidity, wxKind, wxWords } from '../lib/weather.ts';
 import { isaTemp } from '../state/winds.ts';
 import { AIRPORTS, currentHistory, flyTo, getMap, issNow, onHistory, setRoute } from '../map/mapView.ts';
@@ -43,6 +44,7 @@ export function initPanel() {
     const act = t.dataset.act;
     if (act === 'close') app.select(null);
     if (act === 'watch') toggleWatch(t);
+    if (act === 'hazard') app.select({ kind: 'hazard', id: t.dataset.id! });
     if (act === 'follow') {
       app.setFollow(!app.follow);
       const tr = app.selection && picture.get(app.selection.id);
@@ -53,6 +55,7 @@ export function initPanel() {
       flyTo(lon, lat, Number(t.dataset.z) || undefined);
     }
     if (act === 'airport') app.select({ kind: 'airport', id: t.dataset.id! });
+    if (act === 'pick-air') { const a = picture.aircraft.get(t.dataset.id!); if (a) { app.select({ kind: 'air', id: a.id }); flyTo(a.x, a.y, 8); } }
     if (act === 'copy') {
       navigator.clipboard?.writeText(location.href).then(() => { t.textContent = 'Link copied'; }).catch(() => {});
     }
@@ -143,6 +146,9 @@ function renderNow() {
     if (l) renderLaunch(s.id); else close();
   } else if (s.kind === 'wx') {
     renderStation(s.id);
+  } else if (s.kind === 'hazard') {
+    const h = hazards.items.find((x) => x.id === s.id);
+    if (h) renderHazard(h); else { close(); loadHazards().then(() => { if (app.selection?.id === s.id && hazards.items.some((x) => x.id === s.id)) render(); }); }
   }
 }
 
@@ -271,8 +277,10 @@ function renderAircraft(a: Aircraft) {
       <div class="sub" id="ac-sub">${F.esc(desc || r[A.type] || 'Type not broadcast')}</div>
       <div class="sub2" id="ac-sub2">${[r[A.reg], r[A.owner]].filter(Boolean).map(F.esc).join(' · ')}</div>
       ${chips}
+      <div id="hz-flag"></div>
     </div>
     <div id="route"></div>
+    <div id="dest-wx"></div>
     <div class="grid">
       ${cell('Altitude', '', '', '', 'alt')}
       ${cell('Vertical', '', '', '', 'vr')}
@@ -296,6 +304,7 @@ function renderAircraft(a: Aircraft) {
     <div class="prov" id="prov"></div>
   `);
   updateAircraft();
+  loadHazards().then(() => { if (renderedFor === `air:${a.id}`) drawHazardFlag(picture.aircraft.get(a.id) ?? a); });
   let n = 0;
   let lastPos = a.posT;
   tick = window.setInterval(() => {
@@ -324,9 +333,21 @@ function acNewsTerms(a: Aircraft): string[] {
   return [...t];
 }
 
+/** Is this aircraft inside a SIGMET in force, at its levels? */
+function drawHazardFlag(a: Aircraft) {
+  const box = el.querySelector<HTMLElement>('#hz-flag');
+  if (!box) return;
+  const r = a.row;
+  const alt = r[A.alt] ?? r[A.altGeom];
+  const inside = (r[A.flags] & AF.ground) || alt === null ? [] : hazardsAt(a.x, a.y, alt);
+  const html = inside.map((h) => `<button class="chip hz" data-act="hazard" data-id="${F.esc(h.id)}" style="--hz:${HAZARD_COLOR[h.kind]}">In a SIGMET: ${F.esc(h.label)}, ${F.esc(levels(h))}</button>`).join('');
+  if (box.dataset.sig !== html) { box.innerHTML = html; box.dataset.sig = html; }
+}
+
 function updateAircraft() {
   const a = app.selection && picture.aircraft.get(app.selection.id);
   if (!a) return;
+  drawHazardFlag(a);
   const r = a.row;
   const ground = (r[A.flags] & AF.ground) !== 0;
   const alt = r[A.alt];
@@ -492,6 +513,7 @@ function drawRouteBlock(a: Aircraft, rt: Route) {
     return;
   }
   setRoute({ from: [rt.from.lat, rt.from.lon, rt.from.iata || rt.from.icao], to: [rt.to.lat, rt.to.lon, rt.to.iata || rt.to.icao] });
+  if (!ground) loadDestWx(a.id, rt.to.icao, rt.to.iata || rt.to.icao);
   const gs = r[A.gs] ?? 0;
   let eta = '';
   if (!ground && gs > 80 && chk.remaining > 5000) {
@@ -752,6 +774,20 @@ function renderAirport(icao: string) {
   }, `News from ${city || name}`);
 }
 
+/** One line of the destination's latest METAR under the route. */
+async function loadDestWx(id: string, icao: string, code: string) {
+  const box = el.querySelector<HTMLElement>('#dest-wx');
+  if (!box || box.dataset.for === icao) return;
+  box.dataset.for = icao;
+  let m: any = null;
+  try { m = await (await fetch(`/api/metar/${encodeURIComponent(icao)}`)).json(); } catch { return; }
+  if (!m || renderedFor !== `air:${id}` || !el.contains(box)) return;
+  const cat = CATS[m.fltCat];
+  const wind = m.wspd === 0 ? 'calm' : m.wspd != null ? `wind ${m.wdir === 'VRB' ? 'variable' : F.heading(Number(m.wdir))} ${m.wspd} kt${m.wgst ? ` gusting ${m.wgst}` : ''}` : '';
+  const bits = [m.temp != null ? `${m.temp} °C` : '', m.wxString ? wxWords(m.wxString) : '', wind].filter(Boolean).join(' · ');
+  box.innerHTML = `<div class="dest-wx"><span class="k">Weather at ${F.esc(code)} now</span>${cat ? `<span class="cat" style="background:${cat[0]}" title="${F.esc(cat[1])}">${F.esc(m.fltCat)}</span>` : ''}<span>${F.esc(bits)}</span><span class="age">observed ${F.ago(Date.now() / 1000 - m.obsTime)}</span></div>`;
+}
+
 // Flight categories as pilots use them, from ceiling and visibility.
 const CATS: Record<string, [string, string]> = {
   VFR: ['#2f9e44', 'Visual flight rules'], MVFR: ['#1c7ed6', 'Marginal VFR'], IFR: ['#e03131', 'Instrument flight rules'], LIFR: ['#ae3ec9', 'Low IFR'],
@@ -812,6 +848,33 @@ function renderStation(id: string) {
     <div class="prov">Measured at the station and reported as a METAR, the routine weather report airports and automatic stations send every 30 to 60 minutes and whenever the weather changes. Collected worldwide by NOAA's Aviation Weather Center. Nothing here is forecast.</div>
   `);
   loadMetar(id, 'Last report');
+}
+
+function renderHazard(h: (typeof hazards.items)[number]) {
+  const inside = [...picture.aircraft.values()].filter((a) => {
+    const r = a.row;
+    const alt = r[A.alt] ?? r[A.altGeom];
+    return !(r[A.flags] & AF.ground) && alt !== null && hazardsAt(a.x, a.y, alt).some((x) => x.id === h.id);
+  });
+  let lat = 0, lon = 0, n = 0;
+  for (const [x, y] of h.rings[0] ?? []) { lon += x; lat += y; n++; }
+  const until = (Date.now() < h.from ? `from ${F.utc(h.from)} ` : '') + `until ${F.utc(h.to)} UTC`;
+  open(`
+    ${head(`SIGMET · ${F.esc(h.area || 'aviation hazard')}`)}
+    <div class="p-title" style="padding-top:22px">
+      <h2 style="font-size:40px;line-height:1.05;color:${HAZARD_COLOR[h.kind]}">${F.esc(cap(h.label))}</h2>
+      <div class="sub">${F.esc(levels(h))}</div>
+      <div class="sub2">${F.esc(until)}</div>
+    </div>
+    <div class="grid">
+      ${cell('Aircraft inside now', F.n0(inside.length), 'within the area and its levels')}
+      ${cell('In force', F.ago((Date.now() - h.from) / 1000).replace(' ago', ''), `ends ${F.utc(h.to)} UTC`)}
+    </div>
+    ${inside.length ? `<div class="deck-h"><span>Flying through it</span><span>${inside.length}</span></div><div class="results near-list" style="margin:6px 14px 0">${inside.slice(0, 12).map((a) => `<div class="res" role="button" tabindex="0" data-act="pick-air" data-id="${a.id}"><span class="ic">${silhouetteSvg(a.cls, 18)}</span><span><div class="t">${F.esc(a.row[A.cs] || a.row[A.reg] || a.row[A.hex].toUpperCase())}</div><div class="s">${F.esc(a.row[A.type] || CLASS_LABEL[a.cls])}</div></span><span class="r">${F.altitude(a.row[A.alt])}</span></div>`).join('')}</div>` : ''}
+    <div class="metar-raw" style="white-space:pre-wrap">${F.esc(h.raw)}</div>
+    <div class="actions"><button class="btn" data-act="fly" data-lon="${n ? lon / n : 0}" data-lat="${n ? lat / n : 0}" data-z="4.5">Show the area</button></div>
+    <div class="prov">A SIGMET warns every aircraft of weather that is dangerous to all of them, issued by the meteorological watch office for the airspace and valid for a few hours. Collected worldwide by NOAA's Aviation Weather Center. Whether an aircraft is inside one is worked out here, from its reported position and altitude.</div>
+  `);
 }
 
 function renderIss() {

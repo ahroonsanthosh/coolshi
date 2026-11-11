@@ -15,6 +15,7 @@ import { addIcons } from './icons.ts';
 import { loadWinds, onWinds, winds } from '../state/winds.ts';
 import { loadWeather, onWeather, weather } from '../state/weather.ts';
 import { wxKind, wxWords } from '../lib/weather.ts';
+import { HAZARD_COLOR, hazards, levels, loadHazards, onHazards } from '../state/hazards.ts';
 import { altColorExpr, altColor, EMERGENCY, GROUND, INK, QUAKE, SHIP, SHIP_STILL, tempColorExpr } from './colors.ts';
 import { picture, type Aircraft, type Ship } from '../state/data.ts';
 import { app, type Selection } from '../state/app.ts';
@@ -126,9 +127,6 @@ function setup() {
     paint: { 'text-color': '#8a8379', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.4 },
   });
 
-  // Weather radar sits under traffic.
-  map.addSource('radar', { type: 'raster', tiles: [], tileSize: 256, maxzoom: 7 } as any);
-
   // Weather observed at stations (METAR): a dot coloured by the measured air
   // temperature, a ring where it is raining, snowing, storming or foggy right
   // now, an arrow showing where the surface wind is blowing, and the numbers
@@ -184,6 +182,27 @@ function setup() {
       'text-optional': true, 'text-max-width': 10, 'text-line-height': 1.15,
     },
     paint: { 'text-color': '#5c564f', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.4 },
+  });
+
+  // SIGMETs: areas where weather is dangerous to every aircraft, tinted by
+  // kind and outlined, with what and at which levels.
+  addSource('hazards');
+  const hzColor: any = ['match', ['get', 'kind'], ...Object.entries(HAZARD_COLOR).flat(), '#8a8379'];
+  map.addLayer({
+    id: 'hazard-fill', type: 'fill', source: 'hazards', layout: { visibility: 'none' },
+    paint: { 'fill-color': hzColor, 'fill-opacity': ['case', ['get', 'sel'], 0.2, 0.08] },
+  });
+  map.addLayer({
+    id: 'hazard-line', type: 'line', source: 'hazards', layout: { visibility: 'none', 'line-join': 'round' },
+    paint: { 'line-color': hzColor, 'line-width': ['case', ['get', 'sel'], 2.2, 1.2], 'line-dasharray': [3, 2], 'line-opacity': 0.85 },
+  });
+  map.addLayer({
+    id: 'hazard-labels', type: 'symbol', source: 'hazards', minzoom: 2.5,
+    layout: {
+      visibility: 'none', 'text-field': ['get', 'name'], 'text-font': LABEL_FONT_BOLD, 'text-size': 10, 'text-max-width': 12,
+      'text-optional': true, 'symbol-placement': 'point', 'text-letter-spacing': 0.03,
+    },
+    paint: { 'text-color': hzColor, 'text-halo-color': PAPER.bg, 'text-halo-width': 1.6 },
   });
 
   // Earthquakes and disasters.
@@ -503,6 +522,12 @@ function setup() {
   loadRadar();
   setInterval(loadRadar, 5 * 60_000);
   onWeather(() => { drawWeather(); updateClouds(); });
+  onHazards(drawHazards);
+  app.on('selection', () => { if (app.selection?.kind === 'hazard' || hzSel) drawHazards(); });
+  const pollHazards = () => { if (app.layers.hazards) loadHazards(); };
+  app.on('layers', pollHazards);
+  setInterval(pollHazards, 60_000);
+  pollHazards();
   app.on('layers', () => pollWeather());
   setInterval(pollWeather, 60_000);
   pollWeather();
@@ -543,6 +568,7 @@ const LAYER_GROUPS: Record<string, string[]> = {
   winds: ['winds'],
   weather: ['wx-ring', 'wx-wind', 'wx-dots', 'wx-labels'],
   clouds: ['clouds'],
+  hazards: ['hazard-fill', 'hazard-line', 'hazard-labels'],
 };
 
 function applyLayerVisibility() {
@@ -550,7 +576,7 @@ function applyLayerVisibility() {
     const on = app.layers[k as keyof typeof app.layers];
     for (const id of ids) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
   }
-  if (map.getLayer('radar')) map.setLayoutProperty('radar', 'visibility', app.layers.radar ? 'visible' : 'none');
+  radarVisibility();
   needsFull = true;
 }
 
@@ -637,6 +663,19 @@ maplibregl.addProtocol('clouds', async (params, ctl) => {
   return { data: await createImageBitmap(c) };
 });
 
+let hzSel = false;
+function drawHazards() {
+  if (!sources.hazards) return;
+  const sel = app.selection?.kind === 'hazard' ? app.selection.id : '';
+  hzSel = !!sel;
+  const now = Date.now();
+  sources.hazards.setData(fc(hazards.items.filter((h) => h.from <= now + 3600_000 && h.to >= now).map((h) => ({
+    type: 'Feature',
+    geometry: { type: 'MultiPolygon', coordinates: h.rings.map((r) => [r]) },
+    properties: { id: h.id, kind: h.kind, sel: h.id === sel, name: `${h.label.toUpperCase()}\n${levels(h)}` },
+  }))));
+}
+
 /** The global infrared cloud mosaic, one WMS image tiled, at a fixed time. */
 let cloudsShown: number | null = null;
 export function cloudsTime() { return cloudsShown; }
@@ -664,25 +703,96 @@ function updateClouds() {
   }, 'airports');
 }
 
-export let radarTime = 0;
+// Radar: RainViewer keeps the last two hours in ten-minute frames. Each
+// frame is its own raster layer so a loop plays from tiles already loaded;
+// only the newest is fetched unless the loop is asked for. Nothing is
+// downloaded while the layer is off.
+
+const RADAR_OPACITY = 0.55;
+interface RadarFrame { time: number; url: string; layer: string }
+let radarFrames: RadarFrame[] = [];
+let radarShown = -1;
+let radarTimer = 0;
+export const radar = { time: 0, frames: 0, playing: false, index: 0 };
+const radarListeners = new Set<() => void>();
+export const onRadar = (fn: () => void) => radarListeners.add(fn);
+const radarChanged = () => radarListeners.forEach((fn) => fn());
+
 async function loadRadar() {
+  if (!app.layers.radar) return;
   try {
-    const r = await fetch('https://api.rainviewer.com/public/weather-maps.json');
-    const j = await r.json();
-    const frames = j.radar?.past ?? [];
-    const last = frames[frames.length - 1];
-    if (!last) return;
-    radarTime = last.time * 1000;
-    const url = `${j.host}${last.path}/256/{z}/{x}/{y}/2/1_1.png`;
-    if (map.getLayer('radar')) map.removeLayer('radar');
-    if (map.getSource('radar')) map.removeSource('radar');
-    map.addSource('radar', { type: 'raster', tiles: [url], tileSize: 256, maxzoom: 7, attribution: '<a href="https://www.rainviewer.com" target="_blank">RainViewer</a>' });
-    map.addLayer({
-      id: 'radar', type: 'raster', source: 'radar',
-      layout: { visibility: app.layers.radar ? 'visible' : 'none' },
-      paint: { 'raster-opacity': 0.55, 'raster-saturation': -0.35, 'raster-resampling': 'linear' },
-    }, 'wx-ring');
+    const j = await (await fetch('https://api.rainviewer.com/public/weather-maps.json')).json();
+    const past: { time: number; path: string }[] = j.radar?.past ?? [];
+    if (!past.length) return;
+    const next = past.map((f) => ({
+      time: f.time * 1000, url: `${j.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, layer: `radar-${f.time}`,
+    }));
+    // Frames that have aged out of the two hours go.
+    for (const f of radarFrames) if (!next.some((n) => n.layer === f.layer)) dropRadarFrame(f);
+    radarFrames = next;
+    radar.frames = next.length;
+    if (!radar.playing) showRadarFrame(next.length - 1);
   } catch { /* radar is optional */ }
+}
+
+function addRadarFrame(f: RadarFrame) {
+  if (map.getLayer(f.layer)) return;
+  map.addSource(f.layer, { type: 'raster', tiles: [f.url], tileSize: 256, maxzoom: 7, attribution: '<a href="https://www.rainviewer.com" target="_blank">RainViewer</a>' });
+  map.addLayer({
+    id: f.layer, type: 'raster', source: f.layer,
+    layout: { visibility: app.layers.radar ? 'visible' : 'none' },
+    paint: { 'raster-opacity': 0, 'raster-saturation': -0.35, 'raster-resampling': 'linear', 'raster-fade-duration': 0 },
+  }, 'wx-ring');
+}
+
+function dropRadarFrame(f: RadarFrame) {
+  if (map.getLayer(f.layer)) map.removeLayer(f.layer);
+  if (map.getSource(f.layer)) map.removeSource(f.layer);
+}
+
+function showRadarFrame(i: number) {
+  const f = radarFrames[i];
+  if (!f) return;
+  addRadarFrame(f);
+  for (const [j, g] of radarFrames.entries()) {
+    if (map.getLayer(g.layer)) map.setPaintProperty(g.layer, 'raster-opacity', j === i ? RADAR_OPACITY : 0);
+  }
+  radarShown = i;
+  radar.index = i;
+  radar.time = f.time;
+  radarChanged();
+}
+
+/** Play the last two hours, every frame loaded first so the loop is smooth. */
+export function playRadar() {
+  if (!radarFrames.length || radar.playing) return;
+  for (const f of radarFrames) addRadarFrame(f);
+  radar.playing = true;
+  let i = 0, hold = 0;
+  showRadarFrame(0);
+  radarTimer = window.setInterval(() => {
+    if (!app.layers.radar) return stopRadar();
+    if (i === radarFrames.length - 1 && hold++ < 3) return; // linger on now
+    hold = 0;
+    i = (i + 1) % radarFrames.length;
+    showRadarFrame(i);
+  }, 550);
+  radarChanged();
+}
+
+/** Back to the newest frame, and let the others go. */
+export function stopRadar() {
+  clearInterval(radarTimer);
+  radar.playing = false;
+  const last = radarFrames.length - 1;
+  for (const [j, f] of radarFrames.entries()) if (j !== last) dropRadarFrame(f);
+  showRadarFrame(last);
+}
+
+function radarVisibility() {
+  for (const f of radarFrames) if (map.getLayer(f.layer)) map.setLayoutProperty(f.layer, 'visibility', app.layers.radar ? 'visible' : 'none');
+  if (!app.layers.radar && radar.playing) stopRadar();
+  if (app.layers.radar && radarShown < 0) loadRadar();
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,7 +1287,7 @@ function updateIss() {
 // ---------------------------------------------------------------------------
 // Pointer
 
-const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'news', 'airports', 'iss', 'sats', 'launches', 'wx-dots', 'wx-ring'];
+const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'news', 'airports', 'iss', 'sats', 'launches', 'wx-dots', 'wx-ring', 'hazard-line', 'hazard-labels'];
 
 function toSelection(f: MapGeoJSONFeature): Selection | null {
   const id = f.properties?.id as string;
@@ -1192,6 +1302,7 @@ function toSelection(f: MapGeoJSONFeature): Selection | null {
     case 'airports': return { kind: 'airport', id };
     case 'iss': return { kind: 'iss', id: 'iss' };
     case 'wx-dots': case 'wx-ring': return { kind: 'wx', id };
+    case 'hazard-line': case 'hazard-labels': return { kind: 'hazard', id };
   }
   return null;
 }
@@ -1204,7 +1315,7 @@ function pick(point: maplibregl.Point, touch = COARSE_POINTER.matches): Selectio
   if (!feats.length) return null;
   // Tracks are preferred over the background events; within a kind, the
   // nearest to the pointer wins.
-  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' || l === 'sats' ? 0 : l === 'airports' ? 2 : l.startsWith('wx-') ? 3 : 1);
+  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' || l === 'sats' ? 0 : l === 'airports' ? 2 : l.startsWith('wx-') ? 3 : l.startsWith('hazard') ? 4 : 1);
   const dist = (f: MapGeoJSONFeature) => {
     if (f.geometry.type !== 'Point') return 0;
     const p = map.project(f.geometry.coordinates as [number, number]);

@@ -113,3 +113,21 @@ export interface WeatherPayload {
   /** The newest global infrared cloud image (ms), or null if unknown. */
   clouds: number | null;
 }
+
+/** A SIGMET: a warning to aircraft of weather dangerous to all of them,
+ * valid for an area, a band of levels and a few hours. */
+export interface Hazard {
+  id: string;
+  kind: 'storm' | 'turb' | 'ice' | 'ash' | 'cyclone' | 'wave' | 'dust' | 'other';
+  /** In words: "severe turbulence", "embedded thunderstorms". */
+  label: string;
+  /** Who issued it: flight information region, or the US desk. */
+  area: string;
+  from: number; to: number;
+  /** Feet; null base is the surface, null top no stated limit. */
+  base: number | null; top: number | null;
+  raw: string;
+  /** Outer rings, [lon, lat]. */
+  rings: [number, number][][];
+}
+export interface HazardPayload { at: number; items: Hazard[] }

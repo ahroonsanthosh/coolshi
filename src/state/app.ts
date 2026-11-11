@@ -5,18 +5,18 @@ import type { AcClass } from '../lib/aircraft.ts';
 
 export type LayerKey =
   | 'aircraft' | 'ships' | 'labels' | 'airports' | 'quakes' | 'disasters' | 'news' | 'iss' | 'space' | 'radar' | 'night' | 'trails' | 'winds'
-  | 'weather' | 'clouds';
+  | 'weather' | 'clouds' | 'hazards';
 
 export type AcFilter = AcClass | 'ground' | 'military';
 
 export interface Selection {
-  kind: 'air' | 'sea' | 'quake' | 'disaster' | 'airport' | 'iss' | 'news' | 'sat' | 'launch' | 'wx';
+  kind: 'air' | 'sea' | 'quake' | 'disaster' | 'airport' | 'iss' | 'news' | 'sat' | 'launch' | 'wx' | 'hazard';
   id: string;
 }
 
 export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   aircraft: true, ships: true, labels: true, airports: true, quakes: true, disasters: true, news: true, iss: true, space: true,
-  radar: false, night: true, trails: true, winds: false, weather: false, clouds: false,
+  radar: false, night: true, trails: true, winds: false, weather: false, clouds: false, hazards: false,
 };
 
 function load<T>(key: string, fallback: T): T {

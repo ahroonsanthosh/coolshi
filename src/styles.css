@@ -183,6 +183,11 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
 .chip.amber { background: #fdebd3; color: #9a5300; }
 .chip.blue { background: #e3e6fb; color: #3640a8; }
 .chip.teal { background: #d9efeb; color: #0b6b60; }
+button.chip.hz { border: 1px solid var(--hz); color: var(--hz); background: color-mix(in srgb, var(--hz) 8%, transparent); cursor: pointer; text-align: left; }
+#hz-flag:empty { display: none; }
+.dest-wx { margin: 10px 20px 0; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; font-size: 13px; color: var(--ink-2); }
+.dest-wx .k { font: 500 10.5px/1 var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--mute); width: 100%; }
+.dest-wx .age { color: var(--mute); font-size: 12px; }
 
 .route { margin: 18px 20px 0; padding: 16px 0 4px; border-top: 1px solid var(--rule); }
 .route-ends { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 8px; }
@@ -279,6 +284,18 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
 .search .hint { margin-top: 14px; font-size: 12px; color: var(--mute); }
 
 /* ---- Alerts ---- */
+/* Radar time and loop, above the status line while radar is on. */
+.radar-ctl {
+  position: fixed; left: var(--gutter); bottom: 44px; z-index: 6; display: flex; gap: 10px; align-items: center;
+  padding: 6px 8px 6px 12px; border-radius: 20px; background: var(--card); box-shadow: var(--shadow);
+  font: 500 11px/1 var(--font); letter-spacing: 0.04em; text-transform: uppercase; color: var(--mute);
+}
+.radar-ctl b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+.radar-ctl .ticks { display: flex; gap: 3px; }
+.radar-ctl .ticks i { width: 5px; height: 5px; border-radius: 50%; background: var(--rule-2); }
+.radar-ctl .ticks i.on { background: #2a64a8; }
+.radar-ctl button { padding: 6px 10px; border-radius: 14px; background: var(--paper-3); color: var(--ink); font: inherit; letter-spacing: inherit; text-transform: inherit; }
+body.panel-open .radar-ctl { opacity: 0; pointer-events: none; }
 /* Connection: shown only while the live picture isn't live. */
 .notice {
   position: fixed; top: 56px; left: 50%; transform: translateX(-50%); z-index: 14; max-width: min(560px, calc(100vw - 32px));

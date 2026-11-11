@@ -10,7 +10,7 @@
 //   which image is newest, so every viewer draws the same one with its time.
 
 import { gunzipSync } from 'node:zlib';
-import type { WxRow } from '../../shared/protocol.ts';
+import type { Hazard, WxRow } from '../../shared/protocol.ts';
 import { HttpError, Status, UA } from './http.ts';
 
 const METARS = 'https://aviationweather.gov/data/cache/metars.cache.csv.gz';
@@ -128,6 +128,97 @@ export class Clouds {
       this.time = t;
       const h = new Date(t).toISOString().slice(11, 16);
       this.status.success(1, `infrared 10.8 µm from the geostationary ring, every 3 h; newest ${h} UTC`);
+    } catch (e) {
+      this.status.fail(e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SIGMETs: warnings of weather dangerous to all aircraft (thunderstorms,
+// severe turbulence and icing, volcanic ash, tropical cyclones, mountain
+// waves), worldwide from the meteorological watch offices, and the US ones
+// from the Aviation Weather Center, both via aviationweather.gov.
+
+const ISIGMET = 'https://aviationweather.gov/api/data/isigmet?format=geojson';
+const AIRSIGMET = 'https://aviationweather.gov/api/data/airsigmet?format=geojson';
+
+const QUAL: Record<string, string> = {
+  SEV: 'severe', MOD: 'moderate', EMBD: 'embedded', OBSC: 'obscured', FRQ: 'frequent', SQL: 'squall line of', ISOL: 'isolated', OCNL: 'occasional',
+};
+
+/** An international SIGMET's hazard in words, and its kind for the map. */
+export function describeHazard(hazard: string, qualifier = ''): { kind: Hazard['kind']; label: string } {
+  const h = hazard.toUpperCase(), q = qualifier.toUpperCase();
+  const qual = q.split(/\s+/).map((w) => QUAL[w]).filter(Boolean).join(' ');
+  const w = (s: string) => (qual ? `${qual} ${s}` : s);
+  if (h === 'TS' || h === 'TSGR' || h === 'CONVECTIVE') return { kind: 'storm', label: w(h === 'TSGR' ? 'thunderstorms with hail' : 'thunderstorms') };
+  if (h === 'TURB') return { kind: 'turb', label: w('turbulence') };
+  if (h === 'ICE') return { kind: 'ice', label: w(q.includes('FZRA') ? 'icing in freezing rain' : 'icing') };
+  if (h === 'VA' || h === 'ASH') return { kind: 'ash', label: `volcanic ash${q && !QUAL[q] ? `, ${qualifier.trim().toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())}` : ''}` };
+  if (h === 'TC') return { kind: 'cyclone', label: `tropical cyclone${q ? ` ${qualifier.trim().toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase())}` : ''}` };
+  if (h === 'MTW') return { kind: 'wave', label: w('mountain waves') };
+  if (h === 'DS' || h === 'SS') return { kind: 'dust', label: w(h === 'DS' ? 'duststorm' : 'sandstorm') };
+  if (h === 'RDOACT CLD') return { kind: 'other', label: 'radioactive cloud' };
+  return { kind: 'other', label: w(h.toLowerCase()) };
+}
+
+function rings(g: any): [number, number][][] {
+  if (!g) return [];
+  if (g.type === 'Polygon') return [g.coordinates[0]];
+  if (g.type === 'MultiPolygon') return g.coordinates.map((p: any) => p[0]);
+  return [];
+}
+
+export function parseIsigmet(fc: any, now = Date.now()): Hazard[] {
+  const out: Hazard[] = [];
+  for (const f of fc?.features ?? []) {
+    const p = f.properties ?? {};
+    const r = rings(f.geometry);
+    const from = Date.parse(p.validTimeFrom), to = Date.parse(p.validTimeTo);
+    if (!r.length || !isFinite(to) || to < now) continue;
+    const { kind, label } = describeHazard(p.hazard ?? '', p.qualifier ?? '');
+    out.push({
+      id: `i:${p.firId ?? p.icaoId}:${p.seriesId ?? ''}:${p.validTimeFrom}`, kind, label, area: (p.firName ?? p.firId ?? '').trim(),
+      from, to, base: typeof p.base === 'number' ? p.base : null, top: typeof p.top === 'number' ? p.top : null,
+      raw: String(p.rawSigmet ?? '').trim(), rings: r,
+    });
+  }
+  return out;
+}
+
+export function parseAirSigmet(fc: any, now = Date.now()): Hazard[] {
+  const out: Hazard[] = [];
+  for (const f of fc?.features ?? []) {
+    const p = f.properties ?? {};
+    if (p.airSigmetType !== 'SIGMET') continue; // AIRMETs and outlooks are lesser or not yet in force
+    const r = rings(f.geometry);
+    const from = Date.parse(p.validTimeFrom), to = Date.parse(p.validTimeTo);
+    if (!r.length || !isFinite(to) || to < now) continue;
+    const { kind, label } = describeHazard(p.hazard ?? '', p.severity >= 4 && p.hazard !== 'CONVECTIVE' ? 'SEV' : '');
+    const lo = [p.altitudeLow1, p.altitudeLow2].filter((x) => typeof x === 'number');
+    const hi = [p.altitudeHi1, p.altitudeHi2].filter((x) => typeof x === 'number');
+    out.push({
+      id: `us:${p.seriesId ?? ''}:${p.validTimeFrom}`, kind, label, area: 'United States (AWC)',
+      from, to, base: lo.length ? Math.min(...lo) : null, top: hi.length ? Math.max(...hi) : null,
+      raw: String(p.rawAirSigmet ?? '').trim(), rings: r,
+    });
+  }
+  return out;
+}
+
+export class Hazards {
+  status = new Status('sigmets', 'SIGMETs (aviation hazards)', 'event', 600);
+  items: Hazard[] = [];
+
+  async poll() {
+    try {
+      const [i, us] = await Promise.all([
+        fetchBytes(ISIGMET, 30_000).then((b) => JSON.parse(b.toString('utf8'))),
+        fetchBytes(AIRSIGMET, 30_000).then((b) => JSON.parse(b.toString('utf8'))).catch(() => null),
+      ]);
+      this.items = [...parseIsigmet(i), ...(us ? parseAirSigmet(us) : [])];
+      this.status.success(this.items.length, 'thunderstorms, severe turbulence and icing, volcanic ash, cyclones and mountain waves, in force or soon');
     } catch (e) {
       this.status.fail(e);
     }

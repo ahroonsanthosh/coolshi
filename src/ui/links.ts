@@ -10,12 +10,13 @@
 import { app, DEFAULT_LAYERS, type LayerKey, type Selection } from '../state/app.ts';
 import { picture } from '../state/data.ts';
 import { loadWeather } from '../state/weather.ts';
+import { loadHazards } from '../state/hazards.ts';
 import { flyTo, getMap } from '../map/mapView.ts';
 import { describe, toast } from './chrome.ts';
 import * as F from '../lib/format.ts';
 
 const CODES: [Selection['kind'], string][] = [
-  ['quake', 'q'], ['disaster', 'd'], ['airport', 'ap'], ['news', 'n'], ['sat', 'sat'], ['launch', 'go'], ['wx', 'wx'], ['iss', 'iss'],
+  ['quake', 'q'], ['disaster', 'd'], ['airport', 'ap'], ['news', 'n'], ['sat', 'sat'], ['launch', 'go'], ['wx', 'wx'], ['hazard', 'hz'], ['iss', 'iss'],
 ];
 
 interface Parsed {
@@ -147,6 +148,7 @@ function apply(hash: string, first: boolean) {
   // A ship is only sent while in view, unless asked for by MMSI.
   if (p.sel.kind === 'sea') { picture.seaSel = Number(p.sel.id.slice(2)); picture.refreshSea(); }
   if (p.sel.kind === 'wx') loadWeather();
+  if (p.sel.kind === 'hazard') loadHazards();
   pending = { sel: p.sel, give: Date.now() + (p.sel.kind === 'air' || p.sel.kind === 'sea' ? 45_000 : 30_000), fly: !p.view };
   tryPending();
 }
