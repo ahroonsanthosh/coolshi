@@ -61,12 +61,15 @@ test('scheduler: each lane stays under its limit, and the sweep keeps 40% agains
   for (const id of LANES) {
     const mine = log.filter((e) => e.job.lane === id);
     const rate = mine.length / S;
-    assert.ok(rate <= LANE_RATES[id] * 1.01, `${id}: ${rate.toFixed(3)} req/s, limit ${LANE_RATES[id]}`);
+    // Every lane starts with one token in hand; beyond that, its rate.
+    assert.ok(mine.length <= LANE_RATES[id] * S * 1.01 + 1, `${id}: ${rate.toFixed(4)} req/s, limit ${LANE_RATES[id]}`);
     assert.ok(rate >= LANE_RATES[id] * 0.9, `${id}: ${rate.toFixed(3)} req/s, should use its budget`);
     // The reserve is sized so the sweep isn't left with a backlog: it uses
     // about 90% of its 40%, and viewers get the rest.
+    // (A share means something only on a lane with traffic: adsb.lol's
+    // daily allowance gives it a handful of requests in this window.)
     const bg = mine.filter((e) => e.job.bg).length / mine.length;
-    assert.ok(bg >= BG_SHARE * 0.85, `${id}: background share ${bg.toFixed(2)}`);
+    if (mine.length >= 20) assert.ok(bg >= BG_SHARE * 0.85, `${id}: background share ${bg.toFixed(2)}`);
   }
   const swept = new Set(log.filter((e) => e.job.key.startsWith('sw:')).map((e) => e.job.key));
   assert.equal(swept.size, GRID.length, 'no sweep circle starved by viewers');

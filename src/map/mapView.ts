@@ -646,8 +646,16 @@ function drawWeather() {
 // what infrared sees.
 const CLOUD_LO = 105, CLOUD_HI = 205, CLOUD_MAX_ALPHA = 0.62, CLOUD_INK = [104, 110, 120];
 maplibregl.addProtocol('clouds', async (params, ctl) => {
-  const res = await fetch(params.url.replace(/^clouds:/, 'https:'), { signal: ctl.signal });
-  if (!res.ok) throw new Error(`clouds ${res.status}`);
+  // EUMETSAT's server now and then answers a tile with a 500; a hole with
+  // square edges looks broken, so try twice more before giving up.
+  let res: Response | null = null;
+  for (const wait of [0, 1500, 4000]) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    if (ctl.signal.aborted) throw new Error('clouds aborted');
+    res = await fetch(params.url.replace(/^clouds:/, 'https:'), { signal: ctl.signal });
+    if (res.ok || res.status < 500) break;
+  }
+  if (!res?.ok) throw new Error(`clouds ${res?.status}`);
   const bmp = await createImageBitmap(await res.blob());
   const c = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(bmp.width, bmp.height)
@@ -693,7 +701,7 @@ function updateClouds() {
   if (src) { src.setTiles([url]); return; }
   map.addSource('clouds', {
     type: 'raster', tiles: [url], tileSize: 256, maxzoom: 6,
-    attribution: '© <a href="https://view.eumetsat.int" target="_blank">EUMETSAT</a>',
+    attribution: `Contains modified <a href="https://view.eumetsat.int" target="_blank">EUMETSAT</a> data ${new Date().getUTCFullYear()}`,
   });
   map.addLayer({
     id: 'clouds', type: 'raster', source: 'clouds',

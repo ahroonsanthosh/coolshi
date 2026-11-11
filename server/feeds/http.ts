@@ -34,7 +34,9 @@ export async function getJson<T = any>(url: string, init: RequestInit = {}, time
       headers: { 'User-Agent': UA, Accept: 'application/json', 'Accept-Encoding': 'gzip', ...(init.headers ?? {}) },
     });
     if (!res.ok) {
-      const ra = res.headers.get('retry-after') ?? res.headers.get('x-rate-limit-retry-after-seconds');
+      // adsb.lol says when its daily allowance resets (seconds from now).
+      const ra = res.headers.get('retry-after') ?? res.headers.get('x-rate-limit-retry-after-seconds')
+        ?? (res.status === 429 ? res.headers.get('x-ratelimit-reset') : null);
       throw new HttpError(res.status, retryAfter(ra), `${res.status} ${res.statusText}`.trim());
     }
     return { data: (await res.json()) as T, res };

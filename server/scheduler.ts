@@ -20,9 +20,12 @@ import type { View, ViewRegistry } from './views.ts';
 /**
  * Requests a second per lane. adsb.fi, airplanes.live and adsb.one publish
  * one a second; we stay under it (adsb.one, archived upstream in 2026,
- * further). adsb.lol's limits are "dynamic, based on load": one every 4 s.
+ * further). adsb.lol allows 500 requests a day per address without a key
+ * (its x-ratelimit-limit header): spread a little under that across the day
+ * unless the operator has a larger allowance (ADSBLOL_PER_DAY).
  */
-export const LANE_RATES: Record<Provider, number> = { adsbfi: 0.85, airplaneslive: 0.85, adsbone: 0.66, adsblol: 0.25 };
+const ADSBLOL_PER_DAY = Number(process.env.ADSBLOL_PER_DAY) || 450;
+export const LANE_RATES: Record<Provider, number> = { adsbfi: 0.85, airplaneslive: 0.85, adsbone: 0.66, adsblol: ADSBLOL_PER_DAY / 86_400 };
 export const BG_SHARE = 0.4;
 const MAX_IN_FLIGHT = 2;
 const VIEW_MS = 5000;

@@ -26,6 +26,7 @@ import { Gdacs, Iss, Usgs } from './feeds/events.ts';
 import { Clouds, Hazards, Metars } from './feeds/weather.ts';
 import { Replay } from './replay.ts';
 import { searchShips } from './search.ts';
+import { Photos } from './feeds/photos.ts';
 import { Gazetteer, News } from './feeds/news.ts';
 import { Launches, Spacecraft } from './feeds/space.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
@@ -64,6 +65,7 @@ const gdacs = new Gdacs();
 const metars = new Metars();
 const clouds = new Clouds();
 const hazards = new Hazards();
+const photos = new Photos();
 // A snapshot a minute while anyone has watched in the last hour, so the
 // replay has the recent past when someone asks for it.
 const replay = new Replay();
@@ -92,6 +94,9 @@ function registerView(c: string | null, vp: string | null, ip: string) {
 }
 
 const sched = new AdsbScheduler(sweepGrid(join(ROOT, 'src/data/airports.json')), views);
+// ADSB One's terms allow personal use only and forbid redisplaying its data
+// (and its API was archived in 2026): asked only when the operator opts in.
+if (process.env.ADSBONE !== 'on') sched.lanes.adsbone.backoffUntil = Infinity;
 // Rank the types in live traffic; the most common sixty are asked for worldwide.
 setInterval(() => {
   const n = new Map<string, number>();
@@ -106,6 +111,7 @@ const laneStatus: Record<Provider, Status> = {
   airplaneslive: new Status('airplaneslive', 'airplanes.live', 'air', 1 / LANE_RATES.airplaneslive),
   adsbone: new Status('adsbone', 'adsb.one', 'air', 1 / LANE_RATES.adsbone),
 };
+if (process.env.ADSBONE !== 'on') laneStatus.adsbone.note = 'off: its terms allow personal use only (ADSBONE=on to opt in)';
 
 async function runJob(job: Job) {
   const st = laneStatus[job.lane];
@@ -137,8 +143,11 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Feed schedule
 
+// OpenSky's terms ask for a written agreement before its API feeds any
+// live service, even a free one: on only when the operator says they have
+// one (OPENSKY=on).
 every(() => opensky.pollS, async () => {
-  if (process.env.OPENSKY === 'off') { opensky.status.note = 'off'; return 3600; }
+  if (process.env.OPENSKY !== 'on') { opensky.status.note = 'off: needs a written agreement with OpenSky (then set OPENSKY=on)'; return 3600; }
   if (!watching()) return 5;
   return opensky.poll(ingestAir);
 });
@@ -376,7 +385,7 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     const p = url.pathname;
     const ip = ipOf(req);
     if ((p.startsWith('/api/') || p === '/healthz') && !apiLimit.take(ip)) return tooMany(res, apiLimit.retryAfter(ip));
-    if (/^\/api\/(metar|detail\/sea)\//.test(p) && !lookupLimit.take(ip)) return tooMany(res, lookupLimit.retryAfter(ip));
+    if (/^\/api\/(metar|detail\/sea|photo)\//.test(p) && !lookupLimit.take(ip)) return tooMany(res, lookupLimit.retryAfter(ip));
     if (p === '/api/air') {
       registerView(url.searchParams.get('c'), url.searchParams.get('vp'), ip);
       // Only what changed after the browser's cursor; a whole world (the
@@ -408,6 +417,8 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/winds') return await sendJson(req, res, windsCached());
     if (p === '/api/weather') return await sendJson(req, res, weatherBody(), true);
     if (p === '/api/hazards') return await sendJson(req, res, hazardBody(), true);
+    const ph = p.match(/^\/api\/photo\/air\/(~?[0-9a-f]{6})$/i);
+    if (ph) return await sendJson(req, res, await photos.get(ph[1].toLowerCase(), (url.searchParams.get('reg') ?? '').slice(0, 12)));
     if (p === '/api/search') return await sendJson(req, res, { ships: searchShips(sea.values(), url.searchParams.get('q') ?? '') });
     if (p === '/api/replay') return await sendJson(req, res, replay.index());
     if (p === '/api/replay/frame') {

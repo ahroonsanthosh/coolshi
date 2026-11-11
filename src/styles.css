@@ -341,6 +341,7 @@ body.panel-open .radar-ctl { opacity: 0; pointer-events: none; }
 .about-in { max-width: 1100px; margin: 0 auto; display: grid; grid-template-columns: 1.1fr 1fr; gap: 64px; }
 .about h1 { margin: 0 0 18px; font: 800 64px/0.95 var(--font); letter-spacing: -0.04em; }
 .about p { color: var(--ink-2); font-size: 15.5px; line-height: 1.6; margin: 0 0 14px; max-width: 54ch; }
+.about p.credits { font-size: 13px; line-height: 1.55; }
 .about h4 { margin: 34px 0 10px; font: 500 11px/1 var(--font); letter-spacing: 0.08em; text-transform: uppercase; color: var(--mute); }
 .src { display: grid; grid-template-columns: 16px 1fr auto; gap: 2px 8px; padding: 10px 0; border-bottom: 1px solid var(--rule); font-size: 13px; }
 .src .nm { font-weight: 600; }

@@ -253,9 +253,10 @@ export function initStatus() {
   const draw = () => {
     const w = picture.world;
     const srcs = w?.sources ?? [];
-    const air = srcs.filter((s) => s.kind === 'air');
+    // Sources switched off on purpose (by their terms) don't count as down.
+    const air = srcs.filter((s) => s.kind === 'air' && !s.note.startsWith('off'));
     const okAir = air.filter((s) => s.ok).length;
-    const os = srcs.find((s) => s.id === 'opensky');
+    const os = srcs.find((s) => s.id === 'opensky' && !s.note.startsWith('off'));
     const stale = Date.now() - picture.lastAirOk > 15_000;
     const cls = !picture.connected || stale ? 'off' : okAir === air.length ? 'live' : 'warn';
     const label = !picture.connected ? 'Offline' : stale ? 'Reconnecting' : os && !os.ok ? 'Live · regional' : 'Live';
@@ -648,6 +649,8 @@ export function openAbout() {
           <div class="src"><span class="dot"></span><span class="nm">Ship data credits</span><span class="age"></span><span class="meta">Open Waters AIS (openwaters.io/ais), AISHub (aishub.net), aisstream.io, data delivered by BarentsWatch; contains data under the Norwegian licence for Open Government data (NLOD) distributed by the Norwegian Coastal Administration; Fintraffic / digitraffic.fi, CC BY 4.0</span></div>
           <div class="src"><span class="dot"></span><span class="nm">tar1090 aircraft database</span><span class="age">weekly</span><span class="meta">registration, type and operator for 620,000 airframes (Mictronics, wiedehopf)</span></div>
           <div class="src"><span class="dot"></span><span class="nm">OurAirports, ICAO, ITU</span><span class="age"></span><span class="meta">airports, address blocks by state, maritime identification digits</span></div>
+          <h4>Credits and licences</h4>
+          <p class="credits">Aircraft: <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a>; © <a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a> contributors, <a href="https://opendatacommons.org/licenses/odbl/" target="_blank" rel="noopener">ODbL 1.0</a>; <a href="https://airplanes.live" target="_blank" rel="noopener">airplanes.live</a>; OpenSky Network and adsb.one when switched on. Weather: <a href="https://www.rainviewer.com" target="_blank" rel="noopener">weather data by RainViewer</a>; contains modified <a href="https://www.eumetsat.int" target="_blank" rel="noopener">EUMETSAT</a> data ${new Date().getUTCFullYear()} (CC BY 4.0), with NOAA GOES and JMA Himawari imagery; METARs and SIGMETs from NOAA's Aviation Weather Center (no endorsement implied). Photos © their photographers via Planespotters.net, linked to each photo. Routes looked up from adsbdb by your browser, not stored. Airframes from tar1090-db (Mictronics, wiedehopf). Launches from The Space Devs; orbits from CelesTrak.</p>
           <h4>Units</h4>
           <p style="font-size:13px">Altitude is pressure altitude in feet (flight levels above 18,000 ft), speed is over the ground in knots, tracks and courses are degrees true, times are UTC.</p>
         </div>
