@@ -3,9 +3,8 @@
 // (`node server/index.ts`); no build step.
 
 import http from 'node:http';
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, normalize, sep } from 'node:path';
-import { pipeline } from 'node:stream/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +18,7 @@ import { sweepGrid } from './grid.ts';
 import { AdsbScheduler, LANE_RATES, type Job } from './scheduler.ts';
 import { ViewRegistry } from './views.ts';
 import { clientIp, KeyedLimiter } from './pacing.ts';
+import { StaticFiles } from './static.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
@@ -193,11 +193,7 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // HTTP
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
-  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.woff2': 'font/woff2', '.ico': 'image/x-icon',
-  '.webmanifest': 'application/manifest+json',
-};
+const statics = new StaticFiles(DIST);
 
 // Payloads that are the same object for every viewer until their data
 // changes are serialised and compressed once, not once per request.
@@ -365,27 +361,8 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/healthz') {
       return await sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(), sources: sources() });
     }
-    // Static files (production build).
-    if (!existsSync(DIST)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      return res.end('No build found. Run `npm run build`, or use `npm run dev` and open the Vite URL.');
-    }
-    let rel: string;
-    try { rel = decodeURIComponent(p); } catch { res.writeHead(400); return res.end(); }
-    // DIST + sep: a sibling such as dist-old/ must not pass for dist/.
-    let file = normalize(join(DIST, rel));
-    if (file !== DIST && !file.startsWith(DIST + sep)) { res.writeHead(403); return res.end(); }
-    if (!existsSync(file) || statSync(file).isDirectory()) file = join(DIST, 'index.html');
-    const ext = extname(file);
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] ?? 'application/octet-stream',
-      'Cache-Control': p.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
-    });
-    await pipeline(createReadStream(file), res).catch((e) => {
-      // A reader closing the tab mid-download is normal; anything else is worth a line.
-      if (e?.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.warn('[static]', file, e?.message ?? e);
-      res.destroy();
-    });
+    // Static files (production build), compressed once and kept in memory.
+    return await statics.serve(req, res, p);
   } catch (e) {
     failed(res, e);
   }
@@ -395,6 +372,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Watchman aggregator on http://localhost:${PORT}`);
   console.log(`  OpenSky: ${opensky.status.note}, every ${opensky.pollS}s while watched`);
   console.log(`  AISStream: ${aisstream.enabled ? 'on' : 'off (no AISSTREAM_API_KEY)'}`);
+  statics.warm().then((n) => { if (n) console.log(`  Site: ${n} files compressed`); }, (e) => console.warn('[static]', e));
 });
 
 function loadDotEnv(path: string) {
