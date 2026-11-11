@@ -21,6 +21,7 @@ import { app, type Selection } from '../state/app.ts';
 import { news } from '../state/news.ts';
 import { space, countdown } from '../state/space.ts';
 import { altitude } from '../lib/format.ts';
+import { COARSE_POINTER, REDUCED_MOTION } from '../lib/motion.ts';
 import airportsRaw from '../data/airports.json';
 
 type FC = GeoJSON.FeatureCollection;
@@ -781,20 +782,44 @@ export function acHidden(a: Aircraft): boolean {
   return h.has(a.cls);
 }
 
-function inView(b: maplibregl.LngLatBounds | null, x: number, y: number) {
+/** [west, south, east, north]; west and east may run past ±180. */
+type Box = [number, number, number, number];
+
+function inView(b: Box | null, x: number, y: number) {
   if (!b) return true;
-  const w = b.getWest(), e = b.getEast();
-  if (y < b.getSouth() - 1 || y > b.getNorth() + 1) return false;
+  const [w, s, e, n] = b;
+  if (y < s || y > n) return false;
   if (e - w >= 360) return true;
   let xx = x;
-  while (xx < w - 1) xx += 360;
-  while (xx > e + 1) xx -= 360;
-  return xx >= w - 1 && xx <= e + 1;
+  while (xx < w) xx += 360;
+  while (xx > e) xx -= 360;
+  return xx >= w && xx <= e;
+}
+
+/** Does the box `outer` hold all of `inner`? */
+function holds(outer: Box | null, inner: Box | null) {
+  if (!outer) return true;
+  if (!inner) return false;
+  if (inner[1] < outer[1] || inner[3] > outer[3]) return false;
+  if (outer[2] - outer[0] >= 360) return true;
+  let w = inner[0];
+  while (w < outer[0]) w += 360;
+  while (w > outer[2]) w -= 360;
+  return w >= outer[0] && w + (inner[2] - inner[0]) <= outer[2];
 }
 
 function frame(t: number) {
   requestAnimationFrame(frame);
   if (document.hidden) return;
+  if (cameraMoved) {
+    cameraMoved = false;
+    // A full redraw only when the view leaves the padded box drawn last time
+    // or the zoom crosses into another level of detail; panning within it
+    // keeps the throttle (rebuilding every track each frame is the costliest
+    // thing this page can do).
+    const z = map.getZoom();
+    if (!holds(drawnBox, viewBox(z, 0)) || Math.abs(z - drawnZoom) > 0.5) { needsFull = true; needsShips = true; }
+  }
   const z = map.getZoom();
   // Redraw rate scales with how much is on screen: smooth when zoomed in,
   // thrifty with ten thousand aircraft on the globe.
@@ -812,13 +837,26 @@ function frame(t: number) {
   drawTracks(z);
 }
 
-function viewBounds(z: number): maplibregl.LngLatBounds | null {
+/** The view, padded by `pad` of its size each way; null when it is (nearly)
+ * the whole globe, where culling isn't worth it. */
+function viewBox(z: number, pad: number): Box | null {
   if (z < 2.5) return null;
-  try { return map.getBounds(); } catch { return null; }
+  let b: maplibregl.LngLatBounds;
+  try { b = map.getBounds(); } catch { return null; }
+  const w = b.getWest(), e = b.getEast(), s = b.getSouth(), n = b.getNorth();
+  const px = (e - w) * pad, py = (n - s) * pad;
+  if (e - w + 2 * px >= 360) return null;
+  return [w - px, Math.max(-90, s - py), e + px, Math.min(90, n + py)];
 }
 
+let drawnBox: Box | null = null;
+let drawnZoom = 0;
+let cameraMoved = false;
+
 function drawTracks(z: number) {
-  const b = viewBounds(z);
+  const b = viewBox(z, 0.35);
+  drawnBox = b;
+  drawnZoom = z;
   const sel = app.selection;
   const selId = sel && (sel.kind === 'air' || sel.kind === 'sea') ? sel.id : '';
   picture.advance((tr) => tr.id === selId || inView(b, tr.x, tr.y));
@@ -976,7 +1014,7 @@ function updateSelectionOnly() {
   if (!tr) return;
   picture.advance((t) => t === tr);
   sources.sel.setData(fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [tr.x, tr.y] } }]));
-  if (app.follow) map.setCenter([tr.x, tr.y]);
+  if (app.follow) map.setCenter([tr.x, tr.y], { auto: true });
   const now = performance.now();
   if (now - lastTrailDraw < 250) return;
   lastTrailDraw = now;
@@ -1030,30 +1068,35 @@ function greatCircleAhead(lat: number, lon: number, brg: number, m: number): [nu
 // ---------------------------------------------------------------------------
 // Pulses and ISS
 
+// Emergencies and fresh earthquakes pulse. Every change of the ring repaints
+// the whole globe, so it steps about 15 times a second rather than 60, and
+// holds still for anyone who prefers reduced motion.
 function animatePulse(t: number) {
-  const feats: GeoJSON.Feature[] = [];
-  const now = Date.now();
-  for (const a of picture.aircraft.values()) {
-    if (a.row[A.flags] & AF.emergency) feats.push({ type: 'Feature', properties: { color: EMERGENCY }, geometry: { type: 'Point', coordinates: [a.x, a.y] } });
+  if (t - lastPulseData > 1000) {
+    lastPulseData = t;
+    const feats: GeoJSON.Feature[] = [];
+    const now = Date.now();
+    for (const a of picture.aircraft.values()) {
+      if (a.row[A.flags] & AF.emergency) feats.push({ type: 'Feature', properties: { color: EMERGENCY }, geometry: { type: 'Point', coordinates: [a.x, a.y] } });
+    }
+    for (const q of picture.world?.quakes ?? []) {
+      if (now - q.time < 3 * 3600_000 && q.mag >= 3) feats.push({ type: 'Feature', properties: { color: QUAKE }, geometry: { type: 'Point', coordinates: [q.lon, q.lat] } });
+    }
+    if (feats.length || pulseCount) sources.pulse.setData(fc(feats));
+    pulseCount = feats.length;
   }
-  for (const q of picture.world?.quakes ?? []) {
-    if (now - q.time < 3 * 3600_000 && q.mag >= 3) feats.push({ type: 'Feature', properties: { color: QUAKE }, geometry: { type: 'Point', coordinates: [q.lon, q.lat] } });
-  }
-  if (!feats.length) {
-    if (pulseCount) { sources.pulse.setData(fc()); pulseCount = 0; }
-    return;
-  }
-  const phase = (t % 2400) / 2400;
+  if (!pulseCount || t - lastPulseStep < 66) return;
+  lastPulseStep = t;
+  const phase = REDUCED_MOTION.matches ? 0.35 : (t % 2400) / 2400;
+  if (phase === lastPhase) return;
+  lastPhase = phase;
   map.setPaintProperty('pulse', 'circle-radius', 6 + phase * 26);
   map.setPaintProperty('pulse', 'circle-stroke-opacity', 0.7 * (1 - phase));
-  if (pulseCount !== feats.length || t - lastPulseData > 1000) {
-    sources.pulse.setData(fc(feats));
-    pulseCount = feats.length;
-    lastPulseData = t;
-  }
 }
 let pulseCount = 0;
-let lastPulseData = 0;
+let lastPulseData = -1e9;
+let lastPulseStep = 0;
+let lastPhase = -1;
 
 let lastIss = 0;
 let lastSpace = 0;
@@ -1079,7 +1122,7 @@ function updateSpace() {
     });
     if (id === sel) {
       sources.sel?.setData(fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } }]));
-      if (app.follow) map.setCenter([p.lon, p.lat]);
+      if (app.follow) map.setCenter([p.lon, p.lat], { auto: true });
     }
   }
   sources.sats.setData(fc(feats));
@@ -1145,15 +1188,23 @@ function toSelection(f: MapGeoJSONFeature): Selection | null {
   return null;
 }
 
-function pick(point: maplibregl.Point): Selection | null {
+function pick(point: maplibregl.Point, touch = COARSE_POINTER.matches): Selection | null {
   const layers = PICKABLE.filter((l) => map.getLayer(l) && map.getLayoutProperty(l, 'visibility') !== 'none');
-  const box: [maplibregl.PointLike, maplibregl.PointLike] = [[point.x - 8, point.y - 8], [point.x + 8, point.y + 8]];
+  const r = touch ? 20 : 9;
+  const box: [maplibregl.PointLike, maplibregl.PointLike] = [[point.x - r, point.y - r], [point.x + r, point.y + r]];
   const feats = map.queryRenderedFeatures(box, { layers });
   if (!feats.length) return null;
-  // Nearest wins, with tracks preferred over the background events.
+  // Tracks are preferred over the background events; within a kind, the
+  // nearest to the pointer wins.
   const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' || l === 'sats' ? 0 : l === 'airports' ? 2 : l.startsWith('wx-') ? 3 : 1);
-  feats.sort((a, b) => rank(a.layer.id) - rank(b.layer.id));
-  return toSelection(feats[0]);
+  const dist = (f: MapGeoJSONFeature) => {
+    if (f.geometry.type !== 'Point') return 0;
+    const p = map.project(f.geometry.coordinates as [number, number]);
+    return Math.hypot(p.x - point.x, p.y - point.y);
+  };
+  const scored = feats.map((f) => ({ f, k: rank(f.layer.id) * 1000 + Math.min(999, dist(f)) }));
+  scored.sort((a, b) => a.k - b.k);
+  return toSelection(scored[0].f);
 }
 
 function bindPointer() {
@@ -1168,13 +1219,28 @@ function bindPointer() {
   });
   map.on('mouseout', () => app.setHover(null));
   map.on('click', (e) => {
-    const s = pick(e.point);
+    const touch = COARSE_POINTER.matches || (e.originalEvent as PointerEvent | undefined)?.pointerType === 'touch';
+    const s = pick(e.point, touch);
     app.select(s);
   });
   map.on('dragstart', () => { if (app.follow) app.setFollow(false); });
-  map.on('moveend', () => { reportView(); needsShips = true; });
-  map.on('move', () => { needsFull = true; });
+  let lastAutoReport = 0;
+  map.on('moveend', (e: any) => {
+    cameraMoved = true;
+    if (e.auto) {
+      if (performance.now() - lastAutoReport < 2000) return;
+      lastAutoReport = performance.now();
+    }
+    reportView();
+  });
+  map.on('move', () => { cameraMoved = true; });
   reportView();
+}
+
+function sameBox(a: [number, number, number, number] | null | undefined, b: [number, number, number, number] | null) {
+  if (!a || !b) return !a && !b;
+  const tol = Math.max(0.05, (b[3] - b[1]) * 0.08);
+  return a.every((v, i) => Math.abs(v - b[i]) < tol);
 }
 
 function reportView() {
@@ -1194,8 +1260,10 @@ function reportView() {
       bbox = [norm(w - padX), Math.max(-90, b.getSouth() - padY), norm(e + padX), Math.min(90, b.getNorth() + padY)];
     }
   }
+  const moved = !sameBox(picture.view.bbox, bbox);
   picture.view = { lat: c.lat, lon: c.lng, r: map.getZoom() < 3 ? 5000 : Math.min(5000, r), bbox };
-  picture.refreshSea();
+  // Ships come per box: ask again only when the box really changed.
+  if (moved) picture.refreshSea();
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,7 +1271,7 @@ function reportView() {
 
 export function flyTo(lon: number, lat: number, zoom?: number) {
   const z = zoom ?? Math.max(map.getZoom(), 6.5);
-  map.flyTo({ center: [lon, lat], zoom: z, speed: 1.1, curve: 1.5, essential: true });
+  map.flyTo({ center: [lon, lat], zoom: z, speed: 1.1, curve: 1.5 });
 }
 
 export function altColorFor(a: Aircraft) {

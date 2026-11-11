@@ -2,7 +2,7 @@
 // search, alerts, about page and the opening title.
 
 import { A, AF, S } from '../../shared/protocol.ts';
-import { picture, reportAge } from '../state/data.ts';
+import { picture, reportAge, type Ship } from '../state/data.ts';
 import { app, type AcFilter, type LayerKey } from '../state/app.ts';
 import * as F from '../lib/format.ts';
 import { CLASS_LABEL, SQUAWK_MEANING, tidyDesc } from '../lib/aircraft.ts';
@@ -10,6 +10,7 @@ import { shipType, NAV_STATUS } from '../lib/ais.ts';
 import { silhouetteSvg } from '../map/icons.ts';
 import { altGradientCss, tempGradientCss } from '../map/colors.ts';
 import { weather } from '../state/weather.ts';
+import { toggleWatched, watchlist } from '../state/watch.ts';
 import { wxWords } from '../lib/weather.ts';
 import { WX } from '../../shared/protocol.ts';
 import { AIRPORTS, counts, flyTo, issNow, acHidden, getMap } from '../map/mapView.ts';
@@ -274,8 +275,9 @@ export function openSearch() {
   const el = $('search');
   el.hidden = false;
   el.innerHTML = `<div class="search-box">
-      <input type="search" placeholder="Callsign, registration, ship, airport…" autocomplete="off" spellcheck="false" aria-label="Search" />
-      <div class="results" role="listbox"></div>
+      <input type="search" placeholder="Callsign, registration, ship, airport…" autocomplete="off" spellcheck="false" aria-label="Search"
+        role="combobox" aria-controls="search-results" aria-expanded="false" aria-autocomplete="list" />
+      <div class="results" id="search-results" role="listbox" aria-label="Results"></div>
       <div class="hint">↑ ↓ to move · Enter to go · Esc to close</div>
     </div>`;
   const input = el.querySelector('input')!;
@@ -283,12 +285,16 @@ export function openSearch() {
   let hits: Hit[] = [];
   let on = 0;
   const draw = () => {
+    input.setAttribute('aria-expanded', String(hits.length > 0));
+    if (hits.length) input.setAttribute('aria-activedescendant', `sr-${on}`);
+    else input.removeAttribute('aria-activedescendant');
     list.innerHTML = hits.map((h, i) => `
-      <div class="res${i === on ? ' on' : ''}" role="option" data-i="${i}">
+      <div class="res${i === on ? ' on' : ''}" role="option" id="sr-${i}" aria-selected="${i === on}" data-i="${i}">
         <span class="ic">${h.icon}</span>
         <span><div class="t">${F.esc(h.title)}</div><div class="s">${F.esc(h.sub)}</div></span>
         <span class="r">${F.esc(h.right)}</span>
       </div>`).join('');
+    list.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
   };
   const go = (h: Hit | undefined) => {
     if (!h) return;
@@ -296,19 +302,25 @@ export function openSearch() {
     app.select({ kind: h.kind as any, id: h.id });
     flyTo(h.lon, h.lat, h.kind === 'airport' ? 10 : h.kind === 'quake' ? 6 : h.kind === 'news' ? 6 : h.kind === 'sat' ? 3 : h.kind === 'launch' ? 8 : 8.5);
   };
-  input.addEventListener('input', () => { hits = search(input.value); on = 0; draw(); });
+  // About 45,000 things to score: wait for a pause in typing.
+  let typing = 0;
+  input.addEventListener('input', () => {
+    clearTimeout(typing);
+    typing = window.setTimeout(() => { hits = search(input.value); on = 0; draw(); }, 120);
+  });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { on = Math.min(hits.length - 1, on + 1); draw(); e.preventDefault(); }
     if (e.key === 'ArrowUp') { on = Math.max(0, on - 1); draw(); e.preventDefault(); }
-    if (e.key === 'Enter') go(hits[on]);
+    if (e.key === 'Enter') { clearTimeout(typing); if (!hits.length) hits = search(input.value); go(hits[on]); }
     if (e.key === 'Escape') closeSearch();
   });
   list.addEventListener('click', (e) => {
     const r = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
     if (r) go(hits[Number(r.dataset.i)]);
   });
-  el.addEventListener('mousedown', (e) => { if (e.target === el) closeSearch(); });
-  requestAnimationFrame(() => input.focus());
+  el.onmousedown = (e) => { if (e.target === el) closeSearch(); };
+  // Now, not next frame: on a slow device the first letters would be lost.
+  input.focus();
 }
 
 export function closeSearch() {
@@ -391,24 +403,29 @@ function search(q: string): Hit[] {
 // ---------------------------------------------------------------------------
 // Alerts: new emergency squawks and strong earthquakes
 
-export function initAlerts() {
+/** A note in the corner. `tag` and `text` are HTML: escape what you pass. */
+export function toast(tag: string, text: string, onClick: (() => void) | null = null, cls = '', ms = 30_000) {
   const box = $('alerts');
+  const div = document.createElement('div');
+  div.className = 'alert';
+  div.innerHTML = `<span class="tag ${cls}">${tag}</span><span>${text}</span><button class="x" aria-label="Dismiss">×</button>`;
+  div.addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).classList.contains('x')) onClick?.();
+    div.remove();
+  });
+  box.prepend(div);
+  while (box.children.length > 3) box.lastElementChild!.remove();
+  setTimeout(() => div.remove(), ms);
+}
+
+export function initAlerts() {
   const seen = new Set<string>();
   let primed = false;
   const show = (key: string, tag: string, text: string, onClick: () => void, cls = '') => {
     if (seen.has(key)) return;
     seen.add(key);
     if (!primed) return; // don't flood on first load: the posters cover those
-    const div = document.createElement('div');
-    div.className = 'alert';
-    div.innerHTML = `<span class="tag ${cls}">${tag}</span><span>${text}</span><span class="x">×</span>`;
-    div.addEventListener('click', (e) => {
-      if (!(e.target as HTMLElement).classList.contains('x')) onClick();
-      div.remove();
-    });
-    box.prepend(div);
-    while (box.children.length > 3) box.lastElementChild!.remove();
-    setTimeout(() => div.remove(), 30_000);
+    toast(tag, text, onClick, cls);
   };
   const check = () => {
     for (const a of picture.aircraft.values()) {
@@ -435,11 +452,19 @@ export function initAlerts() {
 // ---------------------------------------------------------------------------
 // About
 
+let aboutTimer = 0;
+const srcRows = () => (picture.world?.sources ?? []).map((s) => `
+            <div class="src">
+              <span class="dot ${s.ok ? '' : s.lastOk ? 'warn' : 'off'}"></span>
+              <span class="nm">${F.esc(s.name)}</span>
+              <span class="age">${s.lastOk ? F.ago((Date.now() - s.lastOk) / 1000) : 'not yet'}</span>
+              <span class="meta">${F.esc([s.note, s.lastError && `last error: ${s.lastError}`].filter(Boolean).join(' · '))}</span>
+            </div>`).join('');
+
 export function openAbout() {
   const el = $('about');
   el.hidden = false;
   const draw = () => {
-    const srcs = picture.world?.sources ?? [];
     el.innerHTML = `
       <button class="close" data-act="close-about">Close</button>
       <div class="about-in">
@@ -470,13 +495,7 @@ export function openAbout() {
         </div>
         <div>
           <h4>Sources, live</h4>
-          ${srcs.map((s) => `
-            <div class="src">
-              <span class="dot ${s.ok ? '' : s.lastOk ? 'warn' : 'off'}"></span>
-              <span class="nm">${F.esc(s.name)}</span>
-              <span class="age">${s.lastOk ? F.ago((Date.now() - s.lastOk) / 1000) : 'not yet'}</span>
-              <span class="meta">${F.esc([s.note, s.lastError && `last error: ${s.lastError}`].filter(Boolean).join(' · '))}</span>
-            </div>`).join('')}
+          <div id="about-src">${srcRows()}</div>
           <div class="src"><span class="dot"></span><span class="nm">CelesTrak, The Space Devs</span><span class="age">6 h · 30 min</span><span class="meta">orbital elements for stations, crew and cargo ships and bright satellites; upcoming launches (Launch Library 2)</span></div>
           <div class="src"><span class="dot"></span><span class="nm">News feeds</span><span class="age">every 10–20 min</span><span class="meta">${F.esc(news.feeds.map((f) => `${f.name}${f.ok ? '' : ' (not reachable)'}`).join(', ') || 'loading')}. Headlines link to the publisher.</span></div>
           <div class="src"><span class="dot"></span><span class="nm">Planespotters.net, adsbdb</span><span class="age">on demand</span><span class="meta">aircraft photos, airframes and filed routes</span></div>
@@ -491,7 +510,15 @@ export function openAbout() {
       </div>`;
   };
   draw();
-  const t = setInterval(() => (el.hidden ? clearInterval(t) : draw()), 3000);
+  // Only the live list refreshes, so reading and scrolling aren't disturbed.
+  clearInterval(aboutTimer);
+  aboutTimer = window.setInterval(() => {
+    if (el.hidden) return clearInterval(aboutTimer);
+    const box = el.querySelector('#about-src');
+    const html = srcRows();
+    if (box && box.innerHTML !== html) box.innerHTML = html;
+  }, 3000);
+  requestAnimationFrame(() => el.querySelector<HTMLElement>('[data-act="close-about"]')?.focus({ preventScroll: true }));
   el.onclick = (e) => { if ((e.target as HTMLElement).dataset.act === 'close-about') closeAbout(); };
   document.querySelector('[data-act="about"]')?.setAttribute('aria-pressed', 'true');
 }
@@ -862,9 +889,22 @@ function drawLog(force = false) {
   const sect = (title: string, right: string, body: string, empty: string) =>
     `<div class="deck-h log-h"><span>${title}</span><span>${right}</span></div><div class="results near-list">${body || `<div class="empty small">${empty}</div>`}</div>`;
   const icons: Record<LogEntry['kind'], string> = { drone: 'Drone', emergency: 'Squawk', launch: 'Launch', mil: 'Fast jet', space: 'In orbit' };
+  // What this viewer is watching, tracked or not.
+  const watching = [...watchlist.values()].map((w) => {
+    const t = picture.get(w.id);
+    const live = t && reportAge(t) < t.staleAfter;
+    if (t && w.id.startsWith('a:')) {
+      const a = t as (typeof aloft)[number];
+      const ground = (a.row[A.flags] & AF.ground) !== 0;
+      return row('air', w.id, silhouetteSvg(a.cls, 20), w.label, live ? (ground ? 'on the ground' : 'airborne') : 'last seen ' + F.ago(reportAge(t)), `<b>${F.altitude(a.row[A.alt], ground)}</b>`, t.x, t.y, 8);
+    }
+    if (t) return row('sea', w.id, silhouetteSvg('ship', 18), w.label, live ? ((t as Ship).still ? 'moored or at anchor' : 'under way') : 'last seen ' + F.ago(reportAge(t)), `<b>${F.n1(t.speed ?? 0)} kt</b>`, t.x, t.y, 9);
+    return `<div class="res off" data-unwatch="${F.esc(w.id)}"><span class="ic"></span><span><div class="t">${F.esc(w.label)}</div><div class="s">not being tracked right now</div></span><span class="r"><button class="linkish" data-act="unwatch" data-id="${F.esc(w.id)}">stop</button></span></div>`;
+  });
   el.innerHTML = `
     <div class="drawer-h"><h3>Log</h3><span>unusual traffic, now</span><button class="x" data-act="close-log" aria-label="Close">×</button></div>
     <div class="drawer-list">
+      ${watching.length ? sect('Watching', 'kept on this device', watching.join(''), '') : ''}
       ${em.length ? sect('Emergencies', `${em.length}`, em.map(acRow).join(''), '') : ''}
       ${sect('Spacecraft', `${space.sats.length ? `${space.sats.length} tracked` : 'ISS only'}`, craft.join(''), 'Orbits not loaded yet.')}
       ${sect('Next launches', 'Launch Library 2', launches.join(''), space.loaded ? 'No launches listed.' : 'Loading…')}
@@ -884,13 +924,15 @@ export function initLog() {
     const t = e.target as HTMLElement;
     if (t.closest('[data-act="close-log"]')) return toggleLog(false);
     if (t.closest('[data-act="clear-log"]')) { logEntries = []; logged.clear(); try { localStorage.removeItem('wf.log'); } catch { /* ignore */ } return drawLog(true); }
+    const uw = t.closest<HTMLElement>('[data-act="unwatch"]');
+    if (uw) { const w = watchlist.get(uw.dataset.id!); if (w) toggleWatched(w.id, w.label); return drawLog(true); }
     const r = t.closest<HTMLElement>('[data-kind]');
     if (r) {
-      const kind = r.dataset.kind as 'air' | 'sat' | 'launch' | 'iss';
+      const kind = r.dataset.kind as 'air' | 'sea' | 'sat' | 'launch' | 'iss';
       const id = r.dataset.id!;
       // Where it is now, not where it was when the row was drawn.
       const sat = kind === 'sat' ? space.get(id) : undefined;
-      const at = kind === 'air' ? (() => { const a = picture.aircraft.get(id); return a && { lon: a.x, lat: a.y }; })()
+      const at = kind === 'air' || kind === 'sea' ? (() => { const a = picture.get(id); return a && { lon: a.x, lat: a.y }; })()
         : kind === 'launch' ? space.launches.find((l) => l.id === id)
         : kind === 'iss' ? issNow() : sat && space.pos(sat);
       app.select({ kind, id });

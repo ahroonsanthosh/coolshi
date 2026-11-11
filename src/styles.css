@@ -285,7 +285,9 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
 }
 .alert .tag { font: 700 10.5px/1 var(--font); letter-spacing: 0.08em; text-transform: uppercase; background: #e2231a; color: #fff; padding: 5px 8px; border-radius: 20px; }
 .alert .tag.q { background: var(--quake); }
-.alert .x { opacity: 0.5; margin-left: 4px; }
+.alert .x { opacity: 0.55; margin-left: 4px; background: none; border: 0; font: inherit; color: inherit; cursor: pointer; padding: 4px 6px; }
+.alert .tag.info { background: #5c564f; }
+.alert .tag.watch { background: #0d6f8a; }
 
 /* ---- About ---- */
 .about {

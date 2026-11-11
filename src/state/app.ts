@@ -14,7 +14,7 @@ export interface Selection {
   id: string;
 }
 
-const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
+export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   aircraft: true, ships: true, labels: true, airports: true, quakes: true, disasters: true, news: true, iss: true, space: true,
   radar: false, night: true, trails: true, winds: false, weather: false, clouds: false,
 };
@@ -54,6 +54,11 @@ class AppState {
     save('wf.layers', this.layers);
     this.emit('layers');
   }
+  /** Layers from a shared link: shown, but not saved as this viewer's own. */
+  applyLayers(l: Partial<Record<LayerKey, boolean>>) {
+    Object.assign(this.layers, l);
+    this.emit('layers');
+  }
   /** Show only military aircraft (everything else on the map stays). */
   milOnly = load<{ v: boolean }>('wf.milOnly', { v: false }).v;
   setMilOnly(v: boolean) {
@@ -73,8 +78,6 @@ class AppState {
     if (!s) this.follow = false;
     this.emit('selection');
     this.emit('follow');
-    const hash = s && (s.kind === 'air' || s.kind === 'sea') ? `#${s.id}` : ' ';
-    try { history.replaceState(null, '', hash === ' ' ? location.pathname + location.search : hash); } catch { /* ignore */ }
   }
   setHover(s: Selection | null) {
     if (s?.id === this.hover?.id) return;

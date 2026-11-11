@@ -15,6 +15,7 @@ import { aircraftPhoto, airframe, airline, checkRoute, route, shipFacts, type Ro
 import { silhouetteSvg } from '../map/icons.ts';
 import { altColor, tempColor } from '../map/colors.ts';
 import { weather } from '../state/weather.ts';
+import { isWatched, toggleWatched } from '../state/watch.ts';
 import { humidity, wxKind, wxWords } from '../lib/weather.ts';
 import { isaTemp } from '../state/winds.ts';
 import { AIRPORTS, currentHistory, flyTo, getMap, issNow, onHistory, setRoute } from '../map/mapView.ts';
@@ -41,6 +42,7 @@ export function initPanel() {
     if (!t) return;
     const act = t.dataset.act;
     if (act === 'close') app.select(null);
+    if (act === 'watch') toggleWatch(t);
     if (act === 'follow') {
       app.setFollow(!app.follow);
       const tr = app.selection && picture.get(app.selection.id);
@@ -57,19 +59,55 @@ export function initPanel() {
   });
 }
 
+const watchBtn = (id: string, label: string) =>
+  `<button class="btn" data-act="watch" data-id="${F.esc(id)}" data-label="${F.esc(label)}" aria-pressed="${isWatched(id)}">${isWatched(id) ? 'Watching' : 'Watch'}</button>`;
+
+function toggleWatch(b: HTMLElement) {
+  const on = toggleWatched(b.dataset.id!, b.dataset.label!);
+  b.setAttribute('aria-pressed', String(on));
+  b.textContent = on ? 'Watching' : 'Watch';
+  // Ask once, from the click, so background alerts can reach the system.
+  if (on && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+}
+
 function open(html: string) {
   el.innerHTML = html;
   el.classList.add('open');
+  el.inert = false;
   document.body.classList.add('panel-open');
   el.scrollTop = 0;
 }
 function close() {
   el.classList.remove('open');
+  // Out of sight is out of the tab order and the accessibility tree too.
+  el.inert = true;
   document.body.classList.remove('panel-open');
   renderedFor = '';
 }
 
+/** When a track drops out of the feed, say so and keep counting its age,
+ * rather than leaving "8 s ago" frozen on the sheet. */
+function lostBanner(posT: number | null) {
+  let b = el.querySelector<HTMLElement>('.lost');
+  if (posT === null) { b?.remove(); return; }
+  if (!b) {
+    b = document.createElement('div');
+    b.className = 'lost';
+    b.setAttribute('role', 'status');
+    el.querySelector('.p-head')?.after(b);
+  }
+  b.textContent = `No longer being tracked · last report ${F.ago(Date.now() / 1000 - posT)}. It may have landed, docked or left receiver range.`;
+}
+
 function render() {
+  const was = renderedFor;
+  renderNow();
+  // A new selection: move focus to the sheet so keyboard and screen reader
+  // users land on it (without scrolling the page under a finger).
+  if (renderedFor && renderedFor !== was) el.focus({ preventScroll: true });
+}
+
+function renderNow() {
   clearInterval(tick);
   redrawNews = () => {};
   currentRoute = null;
@@ -251,6 +289,7 @@ function renderAircraft(a: Aircraft) {
     <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
+      ${watchBtn(a.id, r[A.cs] || r[A.reg] || hex.toUpperCase())}
       <a class="btn" href="https://globe.adsb.fi/?icao=${hex}" target="_blank" rel="noopener">adsb.fi ↗</a>
       <button class="btn" data-act="copy">Copy link</button>
     </div>
@@ -258,9 +297,13 @@ function renderAircraft(a: Aircraft) {
   `);
   updateAircraft();
   let n = 0;
+  let lastPos = a.posT;
   tick = window.setInterval(() => {
-    const cur = app.selection && picture.aircraft.get(app.selection.id);
-    if (!cur || renderedFor !== `air:${cur.id}`) return;
+    if (renderedFor !== `air:${a.id}`) return;
+    const cur = picture.aircraft.get(a.id);
+    if (!cur) { lostBanner(lastPos); return; }
+    lostBanner(null);
+    lastPos = cur.posT;
     updateAircraft();
     if (++n % 5 === 0) loadDeck(cur);
   }, 1000);
@@ -545,14 +588,19 @@ function renderShip(s: Ship) {
     <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
+      ${watchBtn(s.id, r[S.name] || `MMSI ${r[S.mmsi]}`)}
       ${r[S.imo] ? `<a class="btn" href="https://www.marinetraffic.com/en/ais/details/ships/imo:${r[S.imo]}" target="_blank" rel="noopener">MarineTraffic ↗</a>` : ''}
       <button class="btn" data-act="copy">Copy link</button>
     </div>
     <div class="prov">Reported over AIS, heard by <b>${F.esc(srcNames(r[S.src]))}</b>${r[S.via] ? ` (relayed from ${F.esc(r[S.via])})` : ''}. Moving ships are carried forward on their course for up to ten minutes between reports. Type, size, destination and draught are typed in by the crew and are often out of date.</div>
   `);
+  let lastPos = s.posT;
   const upd = () => {
-    const cur = app.selection && picture.ships.get(app.selection.id);
-    if (!cur) return;
+    if (renderedFor !== `sea:${s.id}`) return;
+    const cur = picture.ships.get(s.id);
+    if (!cur) { lostBanner(lastPos); return; }
+    lostBanner(null);
+    lastPos = cur.posT;
     const rr = cur.row;
     setCell('sog', rr[S.sog] === null ? '—' : `${F.n1(rr[S.sog]!)} kt`, rr[S.sog] === null ? '' : `${F.n1(rr[S.sog]! * 1.852)} km/h`);
     setCell('cog', F.heading(rr[S.cog]), F.compass(rr[S.cog]));
@@ -795,7 +843,7 @@ function renderIss() {
     const el = sunElevation(Date.now(), p.lat, p.lon);
     setCell('sun', el > -horizonDip ? 'Sunlit' : 'In Earth’s shadow', `sun ${el.toFixed(0)}° at the point below`);
     setCell('pos', F.latLon(p.lat, p.lon), '');
-    if (app.follow) getMap().setCenter([p.lon, p.lat]);
+    if (app.follow) getMap().setCenter([p.lon, p.lat], { auto: true });
   };
   upd();
   tick = window.setInterval(upd, 500);

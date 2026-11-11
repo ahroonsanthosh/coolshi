@@ -7,6 +7,7 @@ import { A, AF, S, type AircraftRow, type Delta, type ShipRow, type WorldPayload
 import { bearing, destination, KT } from '../../shared/geo.ts';
 import { classify, type AcClass } from '../lib/aircraft.ts';
 import { isStationary } from '../lib/ais.ts';
+import { watchedShips } from './watch.ts';
 
 export interface Track {
   kind: 'air' | 'sea';
@@ -77,6 +78,11 @@ export class Picture {
   /** MMSI of the selected ship, always sent even when out of view. */
   seaSel = 0;
   private seaTimer = 0;
+  /** When the next ship poll is due (ms), so a stream of refresh requests
+   * can bring it forward but never keep pushing it back. */
+  private seaDue = 0;
+  private seaBusy = false;
+  private seaAgain = false;
   connected = false;
   lastAirOk = 0;
 
@@ -97,12 +103,28 @@ export class Picture {
       tick();
     };
     loop(() => this.pollAir(), () => 2000);
+    // Ships: one request at a time. A refresh asked for while one is in
+    // flight runs right after it, so replies can't arrive out of order and
+    // an older view's reply can't wipe a newer view's ships.
+    const schedule = (ms: number) => {
+      clearTimeout(this.seaTimer);
+      this.seaDue = Date.now() + ms;
+      this.seaTimer = window.setTimeout(seaLoop, ms);
+    };
     const seaLoop = async () => {
       clearTimeout(this.seaTimer);
+      this.seaDue = 0;
+      this.seaBusy = true;
       try { await this.pollSea(); } catch (e) { console.warn(e); }
-      this.seaTimer = window.setTimeout(seaLoop, document.hidden ? 30_000 : this.view.bbox ? 10_000 : 20_000);
+      this.seaBusy = false;
+      if (this.seaAgain) { this.seaAgain = false; schedule(250); return; }
+      schedule(document.hidden ? 30_000 : this.view.bbox ? 10_000 : 20_000);
     };
-    this.refreshSea = () => { clearTimeout(this.seaTimer); this.seaTimer = window.setTimeout(seaLoop, 400); };
+    this.refreshSea = () => {
+      if (this.seaBusy) { this.seaAgain = true; return; }
+      if (this.seaDue && this.seaDue - Date.now() <= 400) return;
+      schedule(400);
+    };
     seaLoop();
     loop(() => this.pollWorld(), () => 30_000);
   }
@@ -173,7 +195,8 @@ export class Picture {
 
   private async pollSea() {
     const b = this.view.bbox;
-    const q = `${b ? `bbox=${b.map((v) => v.toFixed(2)).join(',')}&` : ''}sel=${this.seaSel}`;
+    const watch = watchedShips();
+    const q = `${b ? `bbox=${b.map((v) => v.toFixed(2)).join(',')}&` : ''}sel=${this.seaSel}${watch.length ? `&watch=${watch.join(',')}` : ''}`;
     const res = await fetch(`/api/sea?${q}`).catch(() => null);
     if (!res?.ok) return;
     const d = (await res.json()) as Delta<ShipRow>;

@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { buildPosters, prepare, PH, PW, type Poster } from './posters.ts';
+import { REDUCED_MOTION } from '../lib/motion.ts';
 
 const GAP = 3.5; // world units between poster centres
 const W = 2.62, H = (W * PH) / PW;
@@ -128,8 +129,12 @@ export class Gallery {
   }
 
   get isOpen() { return !this.root.hidden; }
+  /** Bumped on every open and close, so an open still waiting on fonts and
+   * data gives up if the Index was closed (or reopened) meanwhile. */
+  private gen = 0;
 
   async open() {
+    const gen = ++this.gen;
     this.root.hidden = false;
     this.root.innerHTML = `
       <div class="ix-top"><span>Index · the picture right now</span><button data-act="close-index">Back to the map</button></div>
@@ -142,7 +147,7 @@ export class Gallery {
       await Promise.all([document.fonts.load('900 100px Inter'), document.fonts.load('500 30px Inter'), document.fonts.load('700 30px Inter'), document.fonts.load('800 60px Inter')]);
     } catch { /* fall back to system font */ }
     await prepare();
-    if (this.root.hidden) return;
+    if (this.root.hidden || gen !== this.gen) return;
     this.build();
     this.bind();
     this.openedAt = performance.now();
@@ -152,6 +157,7 @@ export class Gallery {
   }
 
   close() {
+    this.gen++;
     cancelAnimationFrame(this.raf);
     this.unbind();
     for (const it of this.items) {
@@ -287,12 +293,15 @@ export class Gallery {
   }
 
   private loop = () => {
+    if (!this.renderer) return;
     this.raf = requestAnimationFrame(this.loop);
     const now = performance.now();
-    const t = (now - this.t0) / 1000;
+    // Reduced motion: posters hang still, no ripple, no drop-in.
+    const still = REDUCED_MOTION.matches;
+    const t = still ? 0 : (now - this.t0) / 1000;
     const prev = this.offset;
     this.offset += (this.target - this.offset) * 0.085;
-    const v = (this.offset - prev) * 6;
+    const v = still ? 0 : (this.offset - prev) * 6;
     this.vel += (v - this.vel) * 0.15;
     // Hover
     this.ray.setFromCamera(this.mouse, this.camera);
@@ -306,7 +315,7 @@ export class Gallery {
       it.mesh.position.set(x, 0, -Math.abs(x) * 0.12);
       it.mesh.rotation.set(0, -x * 0.05, it.tilt);
       it.hover += ((this.hovered === i ? 1 : 0) - it.hover) * 0.1;
-      const drop = Math.max(0, Math.min(1, 1 - (since - i * 0.07 - 0.05) / 0.9));
+      const drop = still ? 0 : Math.max(0, Math.min(1, 1 - (since - i * 0.07 - 0.05) / 0.9));
       const eased = drop * drop * (3 - 2 * drop);
       const u = it.mesh.material.uniforms;
       u.uTime.value = t;

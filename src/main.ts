@@ -1,12 +1,15 @@
 import './styles.css';
 import { picture } from './state/data.ts';
 import { app } from './state/app.ts';
+import { REDUCED_MOTION } from './lib/motion.ts';
 import { createMap, flyTo, getMap } from './map/mapView.ts';
 import { initPanel } from './ui/panel.ts';
 import {
   initAlerts, initCaption, initClock, initIntro, initKeys, initLayers, initStatus, openAbout, closeAbout, openSearch, toggleLayersPanel,
   initNews, initNearby, initLog, toggleNews, toggleNearby, toggleLog,
 } from './ui/chrome.ts';
+import { initLinks, linkedAtStart } from './ui/links.ts';
+import { initWatch } from './ui/watch.ts';
 import type { Gallery } from './gallery/gallery.ts';
 
 const mapReady = createMap(document.getElementById('map')!);
@@ -21,6 +24,7 @@ initAlerts();
 initNews();
 initNearby();
 initLog();
+initWatch();
 
 // The Index pulls in three.js, so it loads the first time it is opened.
 let gallery: Gallery | null = null;
@@ -40,7 +44,7 @@ async function toggleIndex() {
 
 const home = () => {
   app.select(null);
-  getMap().flyTo({ center: [getMap().getCenter().lng, 25], zoom: 1.7, speed: 1.2, essential: true });
+  getMap().flyTo({ center: [getMap().getCenter().lng, 25], zoom: 1.7, speed: 1.2 });
 };
 
 initKeys({ index: toggleIndex, home });
@@ -68,9 +72,10 @@ document.addEventListener('pointerdown', (e) => {
   if (!lp.hidden && !lp.contains(e.target as Node) && !(e.target as HTMLElement).closest('[data-act="layers"]')) toggleLayersPanel(false);
 });
 
-// A slow drift on the globe until someone touches it.
+// A slow drift on the globe until someone touches it (not for anyone who
+// prefers reduced motion, nor when a link opened somewhere in particular).
 mapReady.then((map) => {
-  let spinning = !location.hash;
+  let spinning = !linkedAtStart() && !REDUCED_MOTION.matches;
   const stop = () => { spinning = false; };
   map.on('mousedown', stop);
   map.on('touchstart', stop);
@@ -82,24 +87,12 @@ mapReady.then((map) => {
     last = t;
     if (spinning && !gallery?.isOpen && map.getZoom() < 3 && !map.isMoving()) {
       const c = map.getCenter();
-      map.setCenter([c.lng + dt * 0.0022, c.lat]);
+      map.setCenter([c.lng + dt * 0.0022, c.lat], { auto: true });
     }
     if (spinning) requestAnimationFrame(spin);
   };
   requestAnimationFrame(spin);
-
-  // Deep link: #a:<hex> or #s:<mmsi>
-  const want = decodeURIComponent(location.hash.slice(1));
-  if (/^[as]:/.test(want)) {
-    const tryOpen = () => {
-      const t = picture.get(want);
-      if (!t) return false;
-      app.select({ kind: want.startsWith('a:') ? 'air' : 'sea', id: want });
-      flyTo(t.x, t.y, 8);
-      return true;
-    };
-    const off = picture.on(() => { if (tryOpen()) off(); });
-  }
+  initLinks();
 });
 
 if (import.meta.env.DEV) (window as any).__wf = { app, picture, getMap };
