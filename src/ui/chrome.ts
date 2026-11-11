@@ -23,6 +23,46 @@ import type { NewsItem } from '../../shared/protocol.ts';
 const $ = (id: string) => document.getElementById(id)!;
 
 // ---------------------------------------------------------------------------
+// Live boxes that refresh themselves every few seconds
+
+const lastHtml = new WeakMap<HTMLElement, string>();
+
+/** The element's identity by its data attributes, to find it again. */
+function keyOf(e: Element): string | null {
+  const attrs = [...e.attributes].filter((a) => a.name.startsWith('data-') || a.name === 'id');
+  if (!attrs.length) return null;
+  return e.tagName.toLowerCase() + attrs.map((a) => `[${a.name}="${CSS.escape(a.value)}"]`).join('');
+}
+
+/** Replace a box's HTML only if it changed, keeping keyboard focus and every
+ * scroll position, so a refresh never throws a reader back to the top. */
+function patch(el: HTMLElement, html: string) {
+  if (lastHtml.get(el) === html) return;
+  lastHtml.set(el, html);
+  const scrolled = [el, ...el.querySelectorAll<HTMLElement>('*')]
+    .filter((x) => x.scrollTop > 0)
+    .map((x) => ({ k: x === el ? null : `${x.tagName}.${x.className}`, t: x.scrollTop }));
+  const a = document.activeElement;
+  const focus = a && a !== el && el.contains(a) ? keyOf(a) : null;
+  el.innerHTML = html;
+  for (const { k, t } of scrolled) {
+    const x = k === null ? el : [...el.querySelectorAll<HTMLElement>('*')].find((y) => `${y.tagName}.${y.className}` === k);
+    if (x) x.scrollTop = t;
+  }
+  if (focus) el.querySelector<HTMLElement>(focus)?.focus({ preventScroll: true });
+}
+
+/** Someone is pointing at, touching or scrolling this box: hold it still. */
+function busy(el: HTMLElement) {
+  return el.matches(':hover') || Number(el.dataset.busyUntil ?? 0) > Date.now();
+}
+function watchBusy(el: HTMLElement) {
+  const mark = () => { el.dataset.busyUntil = String(Date.now() + 1500); };
+  el.addEventListener('touchstart', mark, { passive: true });
+  el.addEventListener('scroll', mark, { passive: true, capture: true });
+}
+
+// ---------------------------------------------------------------------------
 // Clock
 
 export function initClock() {
@@ -161,8 +201,8 @@ export function initStatus() {
     const stale = Date.now() - picture.lastAirOk > 15_000;
     const cls = !picture.connected || stale ? 'off' : okAir === air.length ? 'live' : 'warn';
     const label = !picture.connected ? 'Offline' : stale ? 'Reconnecting' : os && !os.ok ? 'Live · regional' : 'Live';
-    el.innerHTML = `<button data-act="about" title="Sources"><span class="dot ${cls}"></span>${label}</button>
-      <span>${F.n0(counts.airAll)} aircraft</span><span>${F.n0(counts.seaAll)} ships</span>`;
+    patch(el, `<button data-act="about" title="Sources"><span class="dot ${cls}"></span>${label}</button>
+      <span>${F.n0(counts.airAll)} aircraft</span><span>${F.n0(counts.seaAll)} ships</span>`);
   };
   draw();
   setInterval(draw, 2000);
@@ -230,7 +270,7 @@ function drawLayers() {
   const desc: Partial<Record<LayerKey, string>> = {
     ...(weather.clouds ? { clouds: `Infrared picture from the geostationary satellites (EUMETSAT), every 3 hours; this one ${new Date(weather.clouds).toISOString().slice(11, 16)} UTC, ${F.ago((Date.now() - weather.clouds) / 1000)}` } : {}),
   };
-  el.innerHTML = `
+  patch(el, `
     <h3>Layers</h3>
     ${LAYER_INFO.map(([k, name, info, key]) => `
       <div class="tog" role="switch" tabindex="0" aria-checked="${app.layers[k]}" data-layer="${k}">
@@ -246,7 +286,7 @@ function drawLayers() {
     </div>
     <div class="chips">
       ${FILTERS.map(([k, label, icon]) => `<button class="fchip" data-filter="${k}" aria-pressed="${!app.hidden.has(k)}">${silhouetteSvg(icon, 13)}${label}<span class="n">${F.n0(n[k] ?? 0)}</span></button>`).join('')}
-    </div>`;
+    </div>`);
 }
 
 export function initLayers() {
@@ -731,7 +771,7 @@ function locate() {
 function drawNearby(force = false) {
   const el = $('nearby');
   if (el.hidden) return;
-  if (!force && el.matches(':hover')) return;
+  if (!force && busy(el)) return;
   const c = getMap().getCenter();
   const at = me ?? { lat: c.lat, lon: c.lng, label: 'the map centre' };
   const R = nearbyR * 1000;
@@ -771,7 +811,7 @@ function drawNearby(force = false) {
   const air = rows.filter((r) => r.kind === 'air'), sea = rows.filter((r) => r.kind === 'sea');
   const above = air.filter((r) => r.d < 15_000).length;
   const stories = news.near(at.lat, at.lon, 150).slice(0, 3);
-  el.innerHTML = `
+  patch(el, `
     <div class="drawer-h"><h3>Overhead</h3><span>around ${F.esc(at.label)}</span><button class="x" data-act="close-nearby" aria-label="Close">×</button></div>
     <div class="near-sum">
       <div><b>${air.length}</b><span>aircraft within ${nearbyR} km</span></div>
@@ -783,13 +823,15 @@ function drawNearby(force = false) {
       ${[25, 60, 150].map((k) => `<button class="btn" data-r="${k}" aria-pressed="${nearbyR === k}">${k} km</button>`).join('')}
     </div>
     <div class="results near-list">
-      ${rows.slice(0, 60).map((r) => `<div class="res" data-id="${r.id}" data-x="${r.x}" data-y="${r.y}">${r.html}</div>`).join('') || `<div class="empty">Nothing heard within ${nearbyR} km right now. Receiver coverage is thin in some places; try a wider radius.</div>`}
+      ${rows.slice(0, 60).map((r) => `<div class="res" role="button" tabindex="0" data-id="${r.id}" data-x="${r.x}" data-y="${r.y}">${r.html}</div>`).join('') || `<div class="empty">Nothing heard within ${nearbyR} km right now. Receiver coverage is thin in some places; try a wider radius.</div>`}
     </div>
     ${stories.length ? `<div class="deck-h"><span>News nearby</span><span>within 150 km</span></div><div class="stories">${storyList(stories, 3)}</div>` : ''}
-    <div class="drawer-f">Direction is where to look from ${F.esc(at.label)}; the angle is height above the horizon, allowing for the Earth’s curve.${me ? ' Your location stays on this device.' : ''}</div>`;
+    <div class="drawer-f">Direction is where to look from ${F.esc(at.label)}; the angle is height above the horizon, allowing for the Earth’s curve.${me ? ' Your location stays on this device.' : ''}</div>`);
 }
 
 export function initNearby() {
+  watchBusy($('nearby'));
+  keyActivate($('nearby'));
   const el = $('nearby');
   el.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
@@ -859,10 +901,9 @@ function drawLog(force = false) {
   const el = $('log');
   if (el.hidden) return;
   // Hold still while someone is pointing at a row, so clicks land.
-  if (!force && el.matches(':hover')) return;
-  const scroll = el.querySelector('.drawer-list')?.scrollTop ?? 0;
+  if (!force && busy(el)) return;
   const row = (kind: string, id: string, icon: string, t: string, sub: string, right: string, _x: number, _y: number, z: number) =>
-    `<div class="res" data-kind="${kind}" data-id="${F.esc(id)}" data-z="${z}"><span class="ic">${icon}</span><span><div class="t">${F.esc(t)}</div><div class="s">${F.esc(sub)}</div></span><span class="r">${right}</span></div>`;
+    `<div class="res" role="button" tabindex="0" data-kind="${kind}" data-id="${F.esc(id)}" data-z="${z}"><span class="ic">${icon}</span><span><div class="t">${F.esc(t)}</div><div class="s">${F.esc(sub)}</div></span><span class="r">${right}</span></div>`;
   // Spacecraft: everything crewed or visiting a station, and telescopes.
   const craft = space.sats.filter((s) => s.kind !== 'satellite' && s.kind !== 'module').flatMap((s) => {
     const p = space.pos(s);
@@ -901,7 +942,7 @@ function drawLog(force = false) {
     if (t) return row('sea', w.id, silhouetteSvg('ship', 18), w.label, live ? ((t as Ship).still ? 'moored or at anchor' : 'under way') : 'last seen ' + F.ago(reportAge(t)), `<b>${F.n1(t.speed ?? 0)} kt</b>`, t.x, t.y, 9);
     return `<div class="res off" data-unwatch="${F.esc(w.id)}"><span class="ic"></span><span><div class="t">${F.esc(w.label)}</div><div class="s">not being tracked right now</div></span><span class="r"><button class="linkish" data-act="unwatch" data-id="${F.esc(w.id)}">stop</button></span></div>`;
   });
-  el.innerHTML = `
+  patch(el, `
     <div class="drawer-h"><h3>Log</h3><span>unusual traffic, now</span><button class="x" data-act="close-log" aria-label="Close">×</button></div>
     <div class="drawer-list">
       ${watching.length ? sect('Watching', 'kept on this device', watching.join(''), '') : ''}
@@ -913,13 +954,21 @@ function drawLog(force = false) {
       <div class="deck-h log-h"><span>Sightings log</span><span>${logEntries.length ? `<button class="linkish" data-act="clear-log">clear</button>` : 'kept on this device'}</span></div>
       <div class="loglist">${logEntries.slice(0, 80).map((e) => `<div class="logrow" data-log="${F.esc(e.id)}" data-lk="${e.kind}"><span class="lt">${new Date(e.t).toUTCString().slice(5, 11)} ${F.utc(e.t)}</span><span class="lk lk-${e.kind}">${icons[e.kind]}</span><span class="lx">${F.esc(e.text)}</span></div>`).join('') || '<div class="empty small">First sightings of drones, emergencies, fast jets, launches and crew ships are written here, once a day each.</div>'}</div>
     </div>
-    <div class="drawer-f">Tanks and other ground vehicles carry no public transponder, so no open source can show them. Aircraft and ships appear only when they broadcast.</div>`;
-  const list = el.querySelector('.drawer-list');
-  if (list) list.scrollTop = scroll;
+    <div class="drawer-f">Tanks and other ground vehicles carry no public transponder, so no open source can show them. Aircraft and ships appear only when they broadcast.</div>`);
+}
+
+/** Rows that act like buttons answer Enter and Space too. */
+function keyActivate(el: HTMLElement) {
+  el.addEventListener('keydown', (e) => {
+    const t = e.target as HTMLElement;
+    if ((e.key === 'Enter' || e.key === ' ') && t.getAttribute('role') === 'button' && t.tagName !== 'BUTTON') { e.preventDefault(); t.click(); }
+  });
 }
 
 export function initLog() {
   const el = $('log');
+  watchBusy(el);
+  keyActivate(el);
   el.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     if (t.closest('[data-act="close-log"]')) return toggleLog(false);

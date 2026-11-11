@@ -8,8 +8,9 @@
   --card: rgba(246, 244, 240, 0.92);
   --ink: #2a2724;
   --ink-2: #57524c;
-  --mute: #8f8982;
-  --mute-2: #b3ada5;
+  /* Quiet, but readable: 5.0:1 and 4.5:1 on the paper (WCAG AA). */
+  --mute: #6b655e;
+  --mute-2: #726c65;
   --rule: rgba(42, 39, 36, 0.09);
   --rule-2: rgba(42, 39, 36, 0.16);
   --accent: #df3a58;
@@ -77,7 +78,8 @@ body::after { bottom: 0; height: 120px; background: linear-gradient(rgba(242, 23
   color: var(--mute);
 }
 .top > * { pointer-events: auto; }
-.brand { color: var(--mute); text-transform: uppercase; letter-spacing: 0.02em; transition: color 0.2s; }
+.brand { color: var(--mute); text-transform: uppercase; letter-spacing: 0.02em; transition: color 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+.brand-ic { display: none; }
 .brand:hover { color: var(--ink); }
 .clock { font-variant-numeric: tabular-nums; color: var(--mute-2); }
 .nav { margin-left: auto; display: flex; gap: 22px; }
@@ -371,7 +373,7 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
 .tp-sea { background: #0b6b60; }
 .story.severe .tp { background: #b3261e; }
 .nav button[data-badge]:not([data-badge=''])::before {
-  content: attr(data-badge); position: absolute; top: -9px; right: -12px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+  content: attr(data-badge); position: absolute; top: -11px; right: -14px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
   background: #b3261e; color: #fff; font: 700 9.5px/15px var(--font); text-align: center; letter-spacing: 0;
 }
 .alert .tag.n { background: #3640a8; }
@@ -402,10 +404,14 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
 @media (max-width: 760px) {
   .drawer { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-height: 64vh; z-index: 11; }
   .nav-about { display: none; }
-  .nav { gap: 10px; font-size: 11px; }
-  .nav button { white-space: nowrap; }
+  .nav { gap: 10px; font-size: 12px; }
+  /* Fingers: at least 40 px tall to tap, whatever the type size. */
+  .nav button, .brand { white-space: nowrap; min-height: 40px; padding: 0 2px; }
+  .nav button[aria-pressed='true']::after { bottom: 6px; }
+  .status button { min-height: 32px; }
+  .res { padding: 12px 6px; }
   :root { --gutter: 16px; }
-  .top { padding-top: 14px; gap: 10px; font-size: 12px; }
+  .top { padding-top: 6px; gap: 10px; font-size: 12px; align-items: center; }
   .clock { display: none; }
   .nav { gap: 14px; }
   .panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-height: 58vh; transform: translateY(calc(100% + 20px)); }
@@ -419,8 +425,11 @@ body.panel-open .legend { opacity: 0; pointer-events: none; }
   .status { font-size: 10px; gap: 10px; }
 }
 @media (max-width: 480px) {
-  .brand { display: none; }
-  .nav { margin-left: 0; width: 100%; justify-content: space-between; gap: 6px; }
+  /* The name gives way to a small globe, still the way home (G). */
+  .brand-t { display: none; }
+  .brand-ic { display: block; }
+  .brand { flex: none; min-width: 32px; justify-content: center; }
+  .nav { margin-left: 0; flex: 1; justify-content: space-between; gap: 4px; font-size: 11px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

@@ -51,6 +51,9 @@ initKeys({ index: toggleIndex, home });
 app.on('selection', () => {
   const s = app.selection;
   picture.seaSel = s?.kind === 'sea' ? Number(s.id.slice(2)) : 0;
+  // On a phone the drawers and the details sheet share the bottom of the
+  // screen: picking something from a list makes way for its sheet.
+  if (s && matchMedia('(max-width: 760px)').matches) { toggleNearby(false); toggleLog(false); }
 });
 
 document.querySelector('.top')!.addEventListener('click', (e) => {
