@@ -19,6 +19,7 @@ import { AdsbScheduler, LANE_RATES, type Job } from './scheduler.ts';
 import { ViewRegistry } from './views.ts';
 import { clientIp, KeyedLimiter } from './pacing.ts';
 import { StaticFiles } from './static.ts';
+import { healthProblems, LoopLag } from './health.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
@@ -64,7 +65,9 @@ const iss = new Iss();
 const spacecraft = new Spacecraft();
 const launches = new Launches();
 const news = new News(new Gazetteer(join(ROOT, 'src/data/airports.json')));
-const ingestAir = (r: AircraftReport) => air.ingest(r);
+/** When an aircraft report last arrived from any feed, ms (for /healthz). */
+let lastAirAt = 0;
+const ingestAir = (r: AircraftReport) => { lastAirAt = Date.now(); air.ingest(r); };
 
 // ---------------------------------------------------------------------------
 // Who is watching what (server/views.ts), and the ADS-B networks asked about
@@ -199,7 +202,7 @@ const statics = new StaticFiles(DIST);
 // changes are serialised and compressed once, not once per request.
 const packed = new WeakMap<object, { raw: Buffer; z?: Buffer }>();
 
-async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, body: unknown, shared = false) {
+async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, body: unknown, shared = false, status = 200) {
   let pk = shared && body && typeof body === 'object' ? packed.get(body) : undefined;
   if (!pk) {
     pk = { raw: Buffer.from(JSON.stringify(body)) };
@@ -212,12 +215,37 @@ async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, bod
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
   if (raw.length > 1024 && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
     const z = pk.z ?? (pk.z = await gz(raw, { level: 6 }));
-    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': z.length });
+    res.writeHead(status, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': z.length });
     res.end(z);
   } else {
-    res.writeHead(200, { ...headers, 'Content-Length': raw.length });
+    res.writeHead(status, { ...headers, 'Content-Length': raw.length });
     res.end(raw);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Health (server/health.ts): event-loop delay, heap, and how long since an
+// aircraft report arrived; HTTP 503 when not ok.
+
+const loopLag = new LoopLag();
+let watchedSince = 0;
+setInterval(() => {
+  const w = watching();
+  if (w && !watchedSince) watchedSince = Date.now();
+  else if (!w) watchedSince = 0;
+}, 5000).unref();
+
+function health() {
+  const now = Date.now();
+  const lag = loopLag.get();
+  const problems = healthProblems({ now, lagP99: lag.p99, lastAirAt, watchedSince });
+  return {
+    ok: !problems.length, problems,
+    aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(),
+    lagMs: lag, heapMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    lastAircraftS: lastAirAt ? Math.round((now - lastAirAt) / 1000) : null,
+    sources: sources(),
+  };
 }
 
 let wxBody: WeatherPayload | null = null;
@@ -317,7 +345,7 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = new URL(req.url ?? '/', 'http://x');
     const p = url.pathname;
     const ip = ipOf(req);
-    if (p.startsWith('/api/') && !apiLimit.take(ip)) return tooMany(res, apiLimit.retryAfter(ip));
+    if ((p.startsWith('/api/') || p === '/healthz') && !apiLimit.take(ip)) return tooMany(res, apiLimit.retryAfter(ip));
     if (/^\/api\/(metar|detail\/sea)\//.test(p) && !lookupLimit.take(ip)) return tooMany(res, lookupLimit.retryAfter(ip));
     if (p === '/api/air') {
       registerView(url.searchParams.get('c'), url.searchParams.get('vp'), ip);
@@ -359,7 +387,8 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     m = p.match(/^\/api\/history\/sea\/(\d{6,9})$/);
     if (m) return await sendJson(req, res, sea.history(Number(m[1])));
     if (p === '/healthz') {
-      return await sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(), sources: sources() });
+      const h = health();
+      return await sendJson(req, res, h, false, h.ok ? 200 : 503);
     }
     // Static files (production build), compressed once and kept in memory.
     return await statics.serve(req, res, p);
