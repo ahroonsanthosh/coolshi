@@ -4,7 +4,8 @@
 
 import http from 'node:http';
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, sep } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -352,7 +353,18 @@ function sources() {
     .map((s) => s.toJSON());
 }
 
-const server = http.createServer(async (req, res) => {
+// Every rejection ends here: an unobserved one would take the process down.
+const server = http.createServer((req, res) => {
+  serve(req, res).catch((e) => failed(res, e));
+});
+
+function failed(res: http.ServerResponse, e: unknown) {
+  console.error(e);
+  if (!res.headersSent) res.writeHead(500);
+  res.end();
+}
+
+async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
   try {
     const url = new URL(req.url ?? '/', 'http://x');
     const p = url.pathname;
@@ -376,51 +388,56 @@ const server = http.createServer(async (req, res) => {
         now: Date.now(), quakes: usgs.quakes, disasters: gdacs.events, iss: iss.track, sources: sources(),
         ships: shipStats(),
       };
-      return sendJson(req, res, body);
+      return await sendJson(req, res, body);
     }
     let m = p.match(/^\/api\/detail\/air\/([0-9a-f~]{6,7})$/i);
-    if (m) return sendJson(req, res, air.extras(m[1].toLowerCase()));
+    if (m) return await sendJson(req, res, air.extras(m[1].toLowerCase()));
     m = p.match(/^\/api\/detail\/sea\/(\d{6,9})$/);
-    if (m) return sendJson(req, res, await shipDetail(Number(m[1])));
-    if (p === '/api/winds') return sendJson(req, res, windsCached());
-    if (p === '/api/weather') return sendJson(req, res, weatherBody(), true);
+    if (m) return await sendJson(req, res, await shipDetail(Number(m[1])));
+    if (p === '/api/winds') return await sendJson(req, res, windsCached());
+    if (p === '/api/weather') return await sendJson(req, res, weatherBody(), true);
     if (p === '/api/space') {
       const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };
-      return sendJson(req, res, body);
+      return await sendJson(req, res, body);
     }
     if (p === '/api/news') {
       const body: NewsPayload = { now: Date.now(), items: news.items, feeds: [...news.feeds.values()].map((s) => s.toJSON()) };
-      return sendJson(req, res, body);
+      return await sendJson(req, res, body);
     }
     m = p.match(/^\/api\/metar\/([A-Z0-9]{3,4})$/i);
-    if (m) return sendJson(req, res, await metar(m[1].toUpperCase()));
+    if (m) return await sendJson(req, res, await metar(m[1].toUpperCase()));
     m = p.match(/^\/api\/history\/air\/([0-9a-f~]{6,7})$/i);
-    if (m) return sendJson(req, res, air.history(m[1].toLowerCase()));
+    if (m) return await sendJson(req, res, air.history(m[1].toLowerCase()));
     m = p.match(/^\/api\/history\/sea\/(\d{6,9})$/);
-    if (m) return sendJson(req, res, sea.history(Number(m[1])));
+    if (m) return await sendJson(req, res, sea.history(Number(m[1])));
     if (p === '/healthz') {
-      return sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(), sources: sources() });
+      return await sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(), sources: sources() });
     }
     // Static files (production build).
     if (!existsSync(DIST)) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       return res.end('No build found. Run `npm run build`, or use `npm run dev` and open the Vite URL.');
     }
-    let file = normalize(join(DIST, decodeURIComponent(p)));
-    if (!file.startsWith(DIST)) { res.writeHead(403); return res.end(); }
+    let rel: string;
+    try { rel = decodeURIComponent(p); } catch { res.writeHead(400); return res.end(); }
+    // DIST + sep: a sibling such as dist-old/ must not pass for dist/.
+    let file = normalize(join(DIST, rel));
+    if (file !== DIST && !file.startsWith(DIST + sep)) { res.writeHead(403); return res.end(); }
     if (!existsSync(file) || statSync(file).isDirectory()) file = join(DIST, 'index.html');
     const ext = extname(file);
     res.writeHead(200, {
       'Content-Type': MIME[ext] ?? 'application/octet-stream',
       'Cache-Control': p.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
     });
-    createReadStream(file).pipe(res);
+    await pipeline(createReadStream(file), res).catch((e) => {
+      // A reader closing the tab mid-download is normal; anything else is worth a line.
+      if (e?.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.warn('[static]', file, e?.message ?? e);
+      res.destroy();
+    });
   } catch (e) {
-    console.error(e);
-    if (!res.headersSent) res.writeHead(500);
-    res.end();
+    failed(res, e);
   }
-});
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`Watchman aggregator on http://localhost:${PORT}`);
