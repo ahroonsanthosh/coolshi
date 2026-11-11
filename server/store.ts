@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { AF, type AircraftRow, type HistoryPoint, type ShipRow, type Delta } from '../shared/protocol.ts';
 import { distance } from '../shared/geo.ts';
+import { Trail, turned } from './trail.ts';
 
 export interface AircraftReport {
   hex: string;
@@ -44,15 +45,20 @@ interface Aircraft {
   row: AircraftRow;
   upd: number; // server ms of last change
   expires: number; // server ms
-  hist: HistoryPoint[];
+  hist: Trail;
   sqStreak: number; // consecutive reports with an emergency squawk
   ext?: Record<string, unknown>;
   extT?: number;
 }
 
 const EMERGENCY_SQUAWKS = new Set(['7500', '7600', '7700']);
+// Track history. A point is kept when the track turns, climbs or descends,
+// lands or takes off, or a minute has passed (five if it hasn't moved), so a
+// straight cruise costs one point a minute however often it is reported.
 const HIST_MAX_AGE_S = 12 * 3600;
-const HIST_MAX_POINTS = 2400;
+const HIST_MAX_POINTS = 1000;
+const SHIP_HIST_MAX_AGE_S = 6 * 3600;
+const SHIP_HIST_MAX_POINTS = 400;
 
 export interface IdentityLookup {
   get(hex: string): { reg: string; type: string; desc: string; owner: string; mil: boolean; pia: boolean; ladd: boolean } | null;
@@ -82,7 +88,7 @@ export class AirStore {
   get size() { return this.map.size; }
   values() { return [...this.map.values()].map((a) => a.row); }
   get(hex: string) { return this.map.get(hex)?.row; }
-  history(hex: string): HistoryPoint[] { return this.map.get(hex)?.hist ?? []; }
+  history(hex: string): HistoryPoint[] { return this.map.get(hex)?.hist.points() ?? []; }
   extras(hex: string) {
     const a = this.map.get(hex);
     return a?.ext ? { t: a.extT ?? 0, ...a.ext } : null;
@@ -101,6 +107,27 @@ export class AirStore {
     return out;
   }
 
+  /** Airframe database fields, where no feed has filled them in. */
+  private applyIdentity(row: AircraftRow) {
+    const id = this.identity?.get(row[0]);
+    if (!id) return;
+    if (MIL_ONLY_TYPES.has(id.type)) row[14] |= AF.mil;
+    if (!row[10]) row[10] = id.type;
+    if (!row[11]) row[11] = id.reg;
+    if (!row[16]) row[16] = id.desc;
+    if (!row[17]) row[17] = id.owner;
+    row[14] |= (id.mil ? AF.mil : 0) | (id.pia ? AF.pia : 0) | (id.ladd ? AF.ladd : 0);
+  }
+
+  /**
+   * Fill in identity for aircraft first seen before the database loaded.
+   * Browsers get the filled rows with each aircraft's next report, seconds
+   * away for anything still being heard.
+   */
+  fillIdentity() {
+    for (const a of this.map.values()) this.applyIdentity(a.row);
+  }
+
   ingest(r: AircraftReport, now = Date.now()): void {
     if (!isFinite(r.lat) || !isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180) return;
     if (r.posT * 1000 > now + 5000) r.posT = now / 1000; // clock skew guard
@@ -108,20 +135,12 @@ export class AirStore {
     if (!a) {
       a = {
         row: [r.hex, r.lat, r.lon, r.posT, null, null, null, null, null, '', '', '', '', '', 0, 0, '', '', 0, r.cadence, 0, 0, 0],
-        upd: now, expires: 0, hist: [], sqStreak: 0,
+        upd: now, expires: 0, hist: new Trail(HIST_MAX_POINTS, true), sqStreak: 0,
       };
       this.map.set(r.hex, a);
       this.tomb.delete(r.hex);
       if (inMilitaryBlock(r.hex)) a.row[14] |= AF.mil;
-      const id = this.identity?.get(r.hex);
-      if (id && MIL_ONLY_TYPES.has(id.type)) a.row[14] |= AF.mil;
-      if (id) {
-        a.row[10] = id.type;
-        a.row[11] = id.reg;
-        a.row[16] = id.desc;
-        a.row[17] = id.owner;
-        a.row[14] |= (id.mil ? AF.mil : 0) | (id.pia ? AF.pia : 0) | (id.ladd ? AF.ladd : 0);
-      }
+      this.applyIdentity(a.row);
     }
     const row = a.row;
     const newer = r.posT > row[3] + 0.05;
@@ -195,22 +214,22 @@ export class AirStore {
 
   private addHistory(a: Aircraft, r: AircraftReport) {
     const h = a.hist;
-    const last = h[h.length - 1];
-    const p: HistoryPoint = { t: r.posT, lat: r.lat, lon: r.lon, alt: r.ground ? 0 : (r.alt ?? null), gs: r.gs ?? null };
+    const last = h.last();
+    const alt = r.ground ? 0 : (r.alt ?? null);
+    const trk = a.row[7];
     if (last) {
-      const dt = p.t - last.t;
+      const dt = r.posT - last.t;
       if (dt < 4) return;
       // Reject a jump no aircraft could make (garbled position or a
       // duplicate address): faster than Mach 3 between two reports.
-      const v = distance(last.lat, last.lon, p.lat, p.lon) / dt;
-      if (v > 1000 && dt < 600) return;
+      const d = distance(last.lat, last.lon, r.lat, r.lon);
+      if (d / dt > 1000 && dt < 600) return;
+      const turn = trk !== null && h.lastTrk !== null && turned(trk, h.lastTrk) >= 5;
+      const climb = alt !== null && last.alt !== null && (Math.abs(alt - last.alt) >= 500 || (alt === 0) !== (last.alt === 0));
+      if (!turn && !climb && dt < (d < 30 ? 300 : 60)) return;
     }
-    h.push(p);
-    const cutoff = p.t - HIST_MAX_AGE_S;
-    let i = 0;
-    while (i < h.length && h[i].t < cutoff) i++;
-    if (i) h.splice(0, i);
-    if (h.length > HIST_MAX_POINTS) h.splice(0, h.length - HIST_MAX_POINTS);
+    h.push(r.posT, r.lat, r.lon, alt, r.gs ?? null, trk);
+    h.dropBefore(r.posT - HIST_MAX_AGE_S);
   }
 
   /**
@@ -276,7 +295,7 @@ export interface ShipReport {
   src: number;
 }
 
-interface Ship { row: ShipRow; upd: number; hist: HistoryPoint[] }
+interface Ship { row: ShipRow; upd: number; hist: Trail }
 
 export class SeaStore {
   private map = new Map<number, Ship>();
@@ -288,7 +307,7 @@ export class SeaStore {
 
   get size() { return this.map.size; }
   values() { return [...this.map.values()].map((s) => s.row); }
-  history(mmsi: number) { return this.map.get(mmsi)?.hist ?? []; }
+  history(mmsi: number): HistoryPoint[] { return this.map.get(mmsi)?.hist.points() ?? []; }
 
   ingest(r: ShipReport, now = Date.now()) {
     let s = this.map.get(r.mmsi);
@@ -301,7 +320,7 @@ export class SeaStore {
       }
       s = {
         row: [r.mmsi, r.lat!, r.lon!, 0, null, null, null, 15, '', '', 0, 0, '', '', null, null, null, 0, null, '', ''],
-        upd: now, hist: [],
+        upd: now, hist: new Trail(SHIP_HIST_MAX_POINTS, false),
       };
       this.map.set(r.mmsi, s);
       this.tomb.delete(r.mmsi);
@@ -316,15 +335,30 @@ export class SeaStore {
       if (r.hdg !== undefined) row[6] = r.hdg;
       if (r.nav !== undefined) row[7] = r.nav;
       if (r.rot !== undefined) row[18] = r.rot;
-      const h = s.hist, last = h[h.length - 1];
-      if (!last || r.posT! - last.t >= 30) {
-        h.push({ t: r.posT!, lat: r.lat!, lon: r.lon!, alt: null, gs: r.sog ?? null });
-        if (h.length > 1500) h.splice(0, h.length - 1500);
-      }
+      this.addHistory(s.hist, r.posT!, r.lat!, r.lon!, r.sog ?? null, row[5]);
     }
     this.applyStatic(row, r);
     row[17] |= r.src;
     s.upd = now;
+  }
+
+  /**
+   * A point when the ship has gone a kilometre or turned, else every five
+   * minutes: a moored ship reporting every few seconds costs 12 points an
+   * hour, not 120. Six hours at most.
+   */
+  private addHistory(h: Trail, t: number, lat: number, lon: number, sog: number | null, cog: number | null) {
+    const last = h.last();
+    if (last) {
+      const dt = t - last.t;
+      if (dt < 30) return;
+      const d = distance(last.lat, last.lon, lat, lon);
+      // GPS wander at a berth is tens of metres and its course random.
+      const turn = d >= 100 && cog !== null && h.lastTrk !== null && turned(cog, h.lastTrk) >= 10;
+      if (d < 1000 && !turn && dt < 300) return;
+    }
+    h.push(t, lat, lon, null, sog, cog);
+    h.dropBefore(t - SHIP_HIST_MAX_AGE_S);
   }
 
   private applyStatic(row: ShipRow, r: ShipReport) {

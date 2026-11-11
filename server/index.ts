@@ -3,18 +3,23 @@
 // (`node server/index.ts`); no build step.
 
 import http from 'node:http';
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, normalize } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { AirStore, SeaStore, type AircraftReport } from './store.ts';
 import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
-import { PROVIDERS, parseReadsb, type Provider } from './feeds/readsb.ts';
+import { parseReadsb, type Provider } from './feeds/readsb.ts';
 import { Kystverket, ownAisFeeds } from './feeds/kystverket.ts';
-import { OpenWaters, shipDetail } from './feeds/openwaters.ts';
+import { OpenWaters } from './feeds/openwaters.ts';
 import { sweepGrid } from './grid.ts';
+import { AdsbScheduler, LANE_RATES, type Job } from './scheduler.ts';
+import { ViewRegistry } from './views.ts';
+import { clientIp, KeyedLimiter } from './pacing.ts';
+import { StaticFiles } from './static.ts';
+import { healthProblems, LoopLag } from './health.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
@@ -25,7 +30,6 @@ import { Gazetteer, News } from './feeds/news.ts';
 import { Launches, Spacecraft } from './feeds/space.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
 import { AF, SRC, type HazardPayload, type NewsPayload, type SpacePayload, type WeatherPayload, type WorldPayload } from '../shared/protocol.ts';
-import { destination, distance, NM } from '../shared/geo.ts';
 
 const gz = promisify(gzip);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -40,10 +44,13 @@ const estimator = new Estimator();
 air.quiet = (row) => estimator.quiet(row);
 air.estimate = (row) => estimator.estimate(row);
 const acdb = new AircraftDb(join(ROOT, '.cache'));
-acdb.load().then(() => {
-  air.identity = acdb;
-  console.log(`  Aircraft database: ${acdb.status}`);
-});
+air.identity = acdb; // answers nothing until loaded
+const loadAirframes = () => acdb.load()
+  .then(() => { air.fillIdentity(); console.log(`  Aircraft database: ${acdb.status}`); })
+  .catch((e) => console.warn('[airframes]', e));
+loadAirframes();
+// The database is refreshed weekly upstream; pick it up without a restart.
+setInterval(() => { if (acdb.stale) loadAirframes(); }, 6 * 3_600_000).unref();
 const sea = new SeaStore();
 const opensky = new OpenSky();
 const digitraffic = new Digitraffic();
@@ -69,144 +76,63 @@ const iss = new Iss();
 const spacecraft = new Spacecraft();
 const launches = new Launches();
 const news = new News(new Gazetteer(join(ROOT, 'src/data/airports.json')));
-const ingestAir = (r: AircraftReport) => air.ingest(r);
+/** When an aircraft report last arrived from any feed, ms (for /healthz). */
+let lastAirAt = 0;
+const ingestAir = (r: AircraftReport) => { lastAirAt = Date.now(); air.ingest(r); };
 
 // ---------------------------------------------------------------------------
-// Who is watching what. Each browser reports its view; the ADS-B networks are
-// asked about those areas, so zooming in gets fresh, detailed traffic.
+// Who is watching what (server/views.ts), and the ADS-B networks asked about
+// it, paced to what each allows (server/scheduler.ts).
 
-interface View { lat: number; lon: number; r: number; seen: number }
-const views = new Map<string, View>();
-const watching = () => [...views.values()].some((v) => Date.now() - v.seen < 60_000);
+const views = new ViewRegistry();
+const watching = () => views.watching();
+/** Record a client's view from /api/air (clamped and capped per address). */
+function registerView(c: string | null, vp: string | null, ip: string) {
+  views.register(c, vp, ip);
+}
 
-// ---------------------------------------------------------------------------
-// adsb.fi / adsb.lol: two lanes, each paced to what its network allows.
-
-type P = (typeof PROVIDERS)[Provider];
-/** pri 0 runs before pri 1 whenever both are due: what people are looking
- *  at, military and emergencies first, the worldwide sweeps after. */
-type Job = { key: string; url: (p: P) => string; cadence: number; due: number; needsType?: boolean; pri?: number };
-
-// Worldwide by aircraft type: one request returns every aircraft of that type
-// a network can hear, anywhere, so the most common sixty types cover most
-// airline traffic in a fraction of the requests a circle sweep needs.
-// Military types worth asking for by name, worldwide: tankers, transports,
-// patrol, surveillance and command aircraft, and helicopters, many of which
-// fly without a callsign a database would recognise.
-const MIL_TYPES = ['C17', 'K35R', 'K35E', 'KC46', 'C30J', 'C130', 'A400', 'C5M', 'P8', 'P3', 'E3TF', 'E3CF', 'E6', 'R135', 'E8', 'C2', 'KC10',
-  'MRTT', 'A310', 'C295', 'CN35', 'C27J', 'H60', 'H47', 'V22', 'UH1', 'EC45', 'NH90', 'U2', 'Q4', 'B52', 'C40', 'C32', 'E2', 'P1', 'Y20', 'IL76',
-  // Fast jets, bombers and jet trainers: rarely broadcast, but when one does
-  // (ferry flights, airshows, transits with a tanker) these find it.
-  'F16', 'F15', 'F18', 'F18S', 'F35', 'F22', 'F5', 'B1', 'B2', 'EUFI', 'RFAL', 'TOR', 'JAS39', 'HAWK', 'M346', 'T38', 'T45', 'TEX2',
-  'A10', 'AJET', 'L39', 'FA50', 'T50', 'PC21', 'K8', 'E7WT', 'E737', 'R135', 'C135', 'KC2',
-  // Large drones: Reapers, Global Hawks and Tritons often broadcast on transit.
-  'Q9', 'Q4', 'Q1', 'Q25', 'HRON'];
-const SEED_TYPES = ['C172', 'PC12', 'C208', 'B350', 'AT72', 'AT75', 'E145', 'CRJ2', 'E170', 'B734', 'B753', 'B78X', 'A35K', 'A339', 'C56X', 'CL35', 'GLF5', 'GLEX', 'B738', 'A320', 'A20N', 'A21N', 'A321', 'B38M', 'B739', 'A319', 'B789', 'B77W', 'A359', 'B763', 'B788', 'A333', 'E75L', 'CRJ9', 'B737', 'B752', 'DH8D', 'AT76', 'E190', 'A332', 'B772', 'B744', 'B748', 'A388', 'CRJ7', 'E195', 'BCS3', 'B39M'];
-let topTypes = [...SEED_TYPES, ...MIL_TYPES];
+const sched = new AdsbScheduler(sweepGrid(join(ROOT, 'src/data/airports.json')), views);
+// Rank the types in live traffic; the most common sixty are asked for worldwide.
 setInterval(() => {
   const n = new Map<string, number>();
-  for (const r of air.values()) if (r[10] && !(r[14] & 1)) n.set(r[10], (n.get(r[10]) ?? 0) + 1);
-  const ranked = [...n.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t).filter((t) => /^[A-Z0-9]{2,4}$/.test(t));
-  topTypes = [...new Set([...ranked.slice(0, 180), ...SEED_TYPES])].slice(0, 190).concat(MIL_TYPES.filter((t) => !ranked.slice(0, 180).includes(t)));
+  for (const r of air.values()) if (r[10] && !(r[14] & AF.ground)) n.set(r[10], (n.get(r[10]) ?? 0) + 1);
+  sched.setTypes([...n.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t));
 }, 300_000);
-const lastRun = new Map<string, number>();
 
-const SWEEP = sweepGrid(join(ROOT, 'src/data/airports.json'));
-
-function viewPoints(v: View): { lat: number; lon: number; r: number }[] {
-  if (v.r <= 250) return [{ lat: v.lat, lon: v.lon, r: Math.max(25, Math.min(250, v.r * 1.1)) }];
-  if (v.r > 650) return [];
-  const pts = [{ lat: v.lat, lon: v.lon, r: 250 }];
-  for (let b = 0; b < 360; b += 60) {
-    const [lat, lon] = destination(v.lat, v.lon, b, Math.min(v.r * 0.7, 420) * NM);
-    pts.push({ lat, lon, r: 250 });
-  }
-  return pts;
-}
-
-function nextJob(lane: Provider, now: number): Job | null {
-  const jobs: Job[] = [];
-  // 1. What people are looking at, refreshed every ~5 s.
-  const pts: { lat: number; lon: number; r: number }[] = [];
-  for (const v of views.values()) {
-    if (now - v.seen > 30_000) continue;
-    for (const p of viewPoints(v)) {
-      if (!pts.some((q) => distance(q.lat, q.lon, p.lat, p.lon) < 60 * NM && q.r >= p.r)) pts.push(p);
-    }
-  }
-  for (const p of pts.slice(0, 14)) {
-    const key = `pt:${p.lat.toFixed(1)},${p.lon.toFixed(1)}`;
-    jobs.push({ key, url: (P) => P.point(p.lat, p.lon, p.r), cadence: 6, due: (lastRun.get(key) ?? 0) + 5000, pri: 0 });
-  }
-  // 2. Military aircraft and emergency squawks, worldwide.
-  // Each network hears different military traffic: ask every one of them.
-  jobs.push({ key: `mil:${lane}`, url: (P) => P.mil, cadence: 30, due: (lastRun.get(`mil:${lane}`) ?? 0) + 20_000, pri: 0 });
-  for (const s of ['7700', '7600', '7500']) {
-    jobs.push({ key: `sq${s}`, url: (P) => P.sqk(s), cadence: 30, due: (lastRun.get(`sq${s}`) ?? 0) + 30_000, pri: 0 });
-  }
-  // 2b. Worldwide lists in one request: LADD and privacy-address aircraft,
-  // mostly business jets that other networks leave out.
-  PROVIDERS[lane].lists.forEach((u, i) => {
-    const key = `ls${i}:${lane}`;
-    jobs.push({ key, url: () => u, cadence: 90, due: (lastRun.get(key) ?? 0) + 75_000, pri: 0 });
-  });
-  // 3. Worldwide by type, on the networks that offer it.
-  if (PROVIDERS[lane].type) {
-    for (const t of topTypes) {
-      const key = `ty:${t}`;
-      jobs.push({ key, url: (P) => P.type!(t), cadence: 240, due: (lastRun.get(key) ?? 0) + 150_000, needsType: true });
-    }
-  }
-  // 4. Sweep the world, busiest airspace most often. This fills in what
-  // OpenSky misses and carries the whole picture when its credits run out.
-  const fast = opensky.healthy ? 120_000 : 75_000;
-  for (const p of SWEEP) {
-    const key = `sw:${p.lat},${p.lon}`;
-    const busy = p.weight >= 5;
-    jobs.push({ key, url: (P) => P.point(p.lat, p.lon, 250), cadence: busy ? fast / 800 : 330, due: (lastRun.get(key) ?? 0) + (busy ? fast : 300_000) });
-  }
-  const ready = jobs.filter((j) => j.due <= now).sort((a, b) => (a.pri ?? 1) - (b.pri ?? 1) || a.due - b.due);
-  void lane;
-  return ready[0] ?? null;
-}
-
+const LANES = Object.keys(LANE_RATES) as Provider[];
 const laneStatus: Record<Provider, Status> = {
-  adsbfi: new Status('adsbfi', 'adsb.fi', 'air', 1.5),
-  adsblol: new Status('adsblol', 'adsb.lol', 'air', 1.5),
-  airplaneslive: new Status('airplaneslive', 'airplanes.live', 'air', 1.5),
-  adsbone: new Status('adsbone', 'adsb.one', 'air', 1.5),
+  adsbfi: new Status('adsbfi', 'adsb.fi', 'air', 1 / LANE_RATES.adsbfi),
+  adsblol: new Status('adsblol', 'adsb.lol', 'air', 1 / LANE_RATES.adsblol),
+  airplaneslive: new Status('airplaneslive', 'airplanes.live', 'air', 1 / LANE_RATES.airplaneslive),
+  adsbone: new Status('adsbone', 'adsb.one', 'air', 1 / LANE_RATES.adsbone),
 };
 
-function startLane(lane: Provider, offsetMs: number, gapS: number) {
-  const src = SRC[lane];
-  let backoff = 0;
-  let refused = 0;
-  laneStatus[lane].interval = gapS;
-  setTimeout(() => every(() => gapS, async () => {
-    if (!watching()) return 2;
-    if (backoff > Date.now()) return (backoff - Date.now()) / 1000;
-    const now = Date.now();
-    const job = nextJob(lane, now);
-    if (!job) return 1;
-    lastRun.set(job.key, now);
-    try {
-      const { data } = await getJson<any>(job.url(PROVIDERS[lane]), {}, 15_000);
-      const reports = parseReadsb(data, src, job.cadence);
-      for (const r of reports) air.ingest(r);
-      refused = 0;
-      laneStatus[lane].success(reports.length, 'your view, worldwide sweep, military, emergencies');
-    } catch (e) {
-      lastRun.set(job.key, now - 4000); // let the other lane retry it
-      laneStatus[lane].fail(e);
-      const s = e instanceof HttpError ? e.status : 0;
-      if (s === 429) backoff = Date.now() + Math.max(60, (e as HttpError).retryAfter ?? 0) * 1000;
-      else if (s === 401 || s === 403) {
-        // Some networks refuse cloud servers; stop asking for an hour.
-        if (++refused >= 5) { backoff = Date.now() + 3_600_000; laneStatus[lane].fail(e, 'refused from this server; retrying hourly'); }
-      } else if (s >= 500 || !s) backoff = Date.now() + 10_000;
-    }
-  }), offsetMs);
+async function runJob(job: Job) {
+  const st = laneStatus[job.lane];
+  try {
+    const { data } = await getJson<any>(job.url, {}, 15_000);
+    const reports = parseReadsb(data, SRC[job.lane], job.cadence);
+    for (const r of reports) ingestAir(r);
+    sched.done(job);
+    st.interval = 1 / sched.lanes[job.lane].rate(Date.now());
+    st.success(reports.length, 'your view, worldwide sweep, military, emergencies');
+  } catch (e) {
+    const he = e instanceof HttpError ? e : null;
+    st.fail(e, sched.done(job, Date.now(), { status: he?.status ?? 0, retryAfter: he?.retryAfter ?? null }));
+  }
 }
+
+// Each lane starts a request whenever its bucket has a token and work is due.
+setInterval(() => {
+  if (!watching()) return;
+  const now = Date.now();
+  sched.openskyHealthy = opensky.healthy;
+  for (const id of LANES) {
+    if (!sched.lanes[id].ready(now)) continue;
+    const job = sched.next(id, now);
+    if (job) void runJob(job);
+  }
+}, 100);
 
 // ---------------------------------------------------------------------------
 // Feed schedule
@@ -216,12 +142,6 @@ every(() => opensky.pollS, async () => {
   if (!watching()) return 5;
   return opensky.poll(ingestAir);
 });
-// adsb.fi and airplanes.live document one request a second; adsb.lol asks
-// for restraint. Each lane stays under its network's limit.
-startLane('adsbfi', 300, 1.15);
-startLane('adsblol', 1050, 2.5);
-startLane('airplaneslive', 700, 1.15);
-startLane('adsbone', 900, 1.5);
 kystverket.start((r) => sea.ingest(r));
 for (const f of ownAis) f.start((r) => sea.ingest(r));
 
@@ -235,7 +155,7 @@ for (const f of ownAir) {
     try {
       const { data } = await getJson<any>(f.url, {}, 8000);
       const reports = parseReadsb(data, SRC.local, 2);
-      for (const r of reports) air.ingest(r);
+      for (const r of reports) ingestAir(r);
       f.status.success(reports.length, 'your antenna, every 2 s');
     } catch (e) {
       f.status.fail(e);
@@ -244,12 +164,13 @@ for (const f of ownAir) {
   });
 }
 every(() => 0.8, async () => {
-  if (process.env.OPENWATERS === 'off') return 3600;
-  if (!watching()) return 5;
+  if (!openwaters.enabled) return 3600;
+  // Nobody watching: no sweep, but a ship's details still get their turn.
+  if (!watching()) return openwaters.tick((r) => sea.ingest(r), false);
   // Viewers' views first: the 10° boxes their screens overlap, if few.
   const focus: { s: number; w: number; n: number; e: number }[] = [];
-  for (const v of views.values()) {
-    if (Date.now() - v.seen > 30_000 || v.r > 700) continue;
+  for (const v of views.active()) {
+    if (v.r > 700) continue;
     const dLat = v.r / 60, dLon = v.r / 60 / Math.max(0.2, Math.cos((v.lat * Math.PI) / 180));
     for (let s = Math.floor((v.lat - dLat) / 10) * 10; s < v.lat + dLat; s += 10) {
       for (let w = Math.floor((v.lon - dLon) / 10) * 10; w < v.lon + dLon; w += 10) {
@@ -279,40 +200,64 @@ every(() => 6 * 3600, () => spacecraft.poll());
 every(() => 1800, () => launches.poll());
 setInterval(() => { air.sweep(); sea.sweep(); }, 5000);
 setInterval(() => {
-  for (const [k, v] of views) if (Date.now() - v.seen > 120_000) views.delete(k);
+  views.prune();
+  sched.prune();
+  for (const l of [apiLimit, fullLimit, lookupLimit]) l.prune();
 }, 30_000);
 
 // ---------------------------------------------------------------------------
 // HTTP
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
-  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.woff2': 'font/woff2', '.ico': 'image/x-icon',
-  '.webmanifest': 'application/manifest+json',
-};
+const statics = new StaticFiles(DIST);
 
 // Payloads that are the same object for every viewer until their data
 // changes are serialised and compressed once, not once per request.
 const packed = new WeakMap<object, { raw: Buffer; z?: Buffer }>();
 
-async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, body: unknown, shared = false) {
+async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, body: unknown, shared = false, status = 200) {
   let pk = shared && body && typeof body === 'object' ? packed.get(body) : undefined;
   if (!pk) {
     pk = { raw: Buffer.from(JSON.stringify(body)) };
     if (shared && body && typeof body === 'object') packed.set(body, pk);
   }
   const raw = pk.raw;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*',
-  };
+  // No Access-Control-Allow-Origin: the app is same-origin, and the
+  // volunteer networks' data is theirs to publish, not ours to re-serve to
+  // any website that asks.
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
   if (raw.length > 1024 && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
     const z = pk.z ?? (pk.z = await gz(raw, { level: 6 }));
-    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': z.length });
+    res.writeHead(status, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': z.length });
     res.end(z);
   } else {
-    res.writeHead(200, { ...headers, 'Content-Length': raw.length });
+    res.writeHead(status, { ...headers, 'Content-Length': raw.length });
     res.end(raw);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Health (server/health.ts): event-loop delay, heap, and how long since an
+// aircraft report arrived; HTTP 503 when not ok.
+
+const loopLag = new LoopLag();
+let watchedSince = 0;
+setInterval(() => {
+  const w = watching();
+  if (w && !watchedSince) watchedSince = Date.now();
+  else if (!w) watchedSince = 0;
+}, 5000).unref();
+
+function health() {
+  const now = Date.now();
+  const lag = loopLag.get();
+  const problems = healthProblems({ now, lagP99: lag.p99, lastAirAt, watchedSince });
+  return {
+    ok: !problems.length, problems,
+    aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(),
+    lagMs: lag, heapMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    lastAircraftS: lastAirAt ? Math.round((now - lastAirAt) / 1000) : null,
+    sources: sources(),
+  };
 }
 
 let wxBody: WeatherPayload | null = null;
@@ -340,20 +285,26 @@ function windsCached() {
 }
 
 // Airport weather: the latest METAR from aviationweather.gov (NOAA), decoded
-// by them into fields, cached five minutes.
-const metarCache = new Map<string, { t: number; v: unknown }>();
-async function metar(icao: string): Promise<unknown> {
+// by them into fields, cached five minutes; a failed lookup is remembered
+// for three, and a lookup already under way is shared.
+const metarCache = new Map<string, { until: number; v: unknown }>();
+const metarWait = new Map<string, Promise<unknown>>();
+function metar(icao: string): Promise<unknown> {
   const c = metarCache.get(icao);
-  if (c && Date.now() - c.t < 300_000) return c.v;
-  try {
-    const { data } = await getJson<any[]>(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {}, 10_000);
-    const v = data?.[0] ?? null;
-    metarCache.set(icao, { t: Date.now(), v });
-    if (metarCache.size > 1000) metarCache.clear();
-    return v;
-  } catch {
-    return null;
+  if (c && Date.now() < c.until) return Promise.resolve(c.v);
+  let p = metarWait.get(icao);
+  if (!p) {
+    p = getJson<any[]>(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {}, 10_000)
+      .then(({ data }) => ({ v: data?.[0] ?? null, ttl: 300_000 }), () => ({ v: null, ttl: 180_000 }))
+      .then(({ v, ttl }) => {
+        if (metarCache.size >= 1000) metarCache.clear();
+        metarCache.set(icao, { until: Date.now() + ttl, v });
+        return v;
+      })
+      .finally(() => metarWait.delete(icao));
+    metarWait.set(icao, p);
   }
+  return p;
 }
 
 let statsCache = { t: 0, v: sea.stats() };
@@ -365,22 +316,62 @@ function shipStats() {
 function sources() {
   let est = 0;
   for (const r of air.values()) if (r[14] & AF.est) est++;
-  estimator.status.count = est;
-  estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
+  estimator.active = est;
   return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, metars.status, clouds.status, hazards.status, iss.status, spacecraft.status, launches.status, news.status]
     .map((s) => s.toJSON());
 }
 
-const server = http.createServer(async (req, res) => {
+// Every rejection ends here: an unobserved one would take the process down.
+const server = http.createServer((req, res) => {
+  serve(req, res).catch((e) => failed(res, e));
+});
+
+function failed(res: http.ServerResponse, e: unknown) {
+  console.error(e);
+  if (!res.headersSent) res.writeHead(500);
+  res.end();
+}
+
+// ---------------------------------------------------------------------------
+// Limits per client address. Generous for a browser (it polls a few
+// endpoints every few seconds), firm for a script.
+
+/** Any /api/ request: 20 a second, bursts of 60. */
+const apiLimit = new KeyedLimiter(20, 60);
+/** Whole aircraft snapshots (since=0), the most expensive answer: three, then one per 10 s. */
+const fullLimit = new KeyedLimiter(0.1, 3);
+/** Lookups that cost an upstream request (METAR, ship particulars). */
+const lookupLimit = new KeyedLimiter(1, 10);
+
+// The client's address, from X-Forwarded-For's first hop behind Render's
+// proxy (see clientIp). TRUST_PROXY_HOPS=0 ignores the header; 2 if
+// another proxy sits in front. Logged once so a deploy can check it.
+const PROXY_HOPS = Math.max(0, Math.floor(Number(process.env.TRUST_PROXY_HOPS || 1)) || 0); // unset or empty: 1
+let xffNoted = false;
+function ipOf(req: http.IncomingMessage): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff && !xffNoted) {
+    xffNoted = true;
+    console.log(`  X-Forwarded-For from ${req.socket.remoteAddress}: ${String(xff).split(',').length} entries; trusting the last ${PROXY_HOPS}`);
+  }
+  return clientIp(req.socket.remoteAddress ?? '', xff, PROXY_HOPS);
+}
+
+function tooMany(res: http.ServerResponse, retryS: number) {
+  res.writeHead(429, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Retry-After': String(retryS) });
+  res.end('{"error":"too many requests"}');
+}
+
+async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
   try {
     const url = new URL(req.url ?? '/', 'http://x');
     const p = url.pathname;
+    const ip = ipOf(req);
+    if ((p.startsWith('/api/') || p === '/healthz') && !apiLimit.take(ip)) return tooMany(res, apiLimit.retryAfter(ip));
+    if (/^\/api\/(metar|detail\/sea)\//.test(p) && !lookupLimit.take(ip)) return tooMany(res, lookupLimit.retryAfter(ip));
     if (p === '/api/air') {
-      const c = url.searchParams.get('c');
-      const vp = url.searchParams.get('vp')?.split(',').map(Number);
-      if (c && vp && vp.length >= 3 && vp.every(isFinite)) {
-        views.set(c.slice(0, 40), { lat: vp[0], lon: vp[1], r: vp[2], seen: Date.now() });
-      }
+      registerView(url.searchParams.get('c'), url.searchParams.get('vp'), ip);
+      if (!Number(url.searchParams.get('since')) && !fullLimit.take(ip)) return tooMany(res, fullLimit.retryAfter(ip));
       return sendJson(req, res, air.delta(Number(url.searchParams.get('since')) || 0));
     }
     if (p === '/api/sea') {
@@ -395,64 +386,52 @@ const server = http.createServer(async (req, res) => {
         now: Date.now(), quakes: usgs.quakes, disasters: gdacs.events, iss: iss.track, sources: sources(),
         ships: shipStats(),
       };
-      return sendJson(req, res, body);
+      return await sendJson(req, res, body);
     }
     let m = p.match(/^\/api\/detail\/air\/([0-9a-f~]{6,7})$/i);
-    if (m) return sendJson(req, res, air.extras(m[1].toLowerCase()));
+    if (m) return await sendJson(req, res, air.extras(m[1].toLowerCase()));
     m = p.match(/^\/api\/detail\/sea\/(\d{6,9})$/);
-    if (m) return sendJson(req, res, await shipDetail(Number(m[1])));
-    if (p === '/api/winds') return sendJson(req, res, windsCached());
-    if (p === '/api/weather') return sendJson(req, res, weatherBody(), true);
-    if (p === '/api/hazards') return sendJson(req, res, hazardBody(), true);
-    if (p === '/api/search') return sendJson(req, res, { ships: searchShips(sea.values(), url.searchParams.get('q') ?? '') });
-    if (p === '/api/replay') return sendJson(req, res, replay.index());
+    if (m) return await sendJson(req, res, await openwaters.detail(Number(m[1])));
+    if (p === '/api/winds') return await sendJson(req, res, windsCached());
+    if (p === '/api/weather') return await sendJson(req, res, weatherBody(), true);
+    if (p === '/api/hazards') return await sendJson(req, res, hazardBody(), true);
+    if (p === '/api/search') return await sendJson(req, res, { ships: searchShips(sea.values(), url.searchParams.get('q') ?? '') });
+    if (p === '/api/replay') return await sendJson(req, res, replay.index());
     if (p === '/api/replay/frame') {
       const b = url.searchParams.get('bbox')?.split(',').map(Number);
       const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
-      return sendJson(req, res, replay.frame(Number(url.searchParams.get('t')) || Date.now(), box));
+      return await sendJson(req, res, replay.frame(Number(url.searchParams.get('t')) || Date.now(), box));
     }
     if (p === '/api/space') {
       const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };
-      return sendJson(req, res, body);
+      return await sendJson(req, res, body);
     }
     if (p === '/api/news') {
       const body: NewsPayload = { now: Date.now(), items: news.items, feeds: [...news.feeds.values()].map((s) => s.toJSON()) };
-      return sendJson(req, res, body);
+      return await sendJson(req, res, body);
     }
     m = p.match(/^\/api\/metar\/([A-Z0-9]{3,4})$/i);
-    if (m) return sendJson(req, res, await metar(m[1].toUpperCase()));
+    if (m) return await sendJson(req, res, await metar(m[1].toUpperCase()));
     m = p.match(/^\/api\/history\/air\/([0-9a-f~]{6,7})$/i);
-    if (m) return sendJson(req, res, air.history(m[1].toLowerCase()));
+    if (m) return await sendJson(req, res, air.history(m[1].toLowerCase()));
     m = p.match(/^\/api\/history\/sea\/(\d{6,9})$/);
-    if (m) return sendJson(req, res, sea.history(Number(m[1])));
+    if (m) return await sendJson(req, res, sea.history(Number(m[1])));
     if (p === '/healthz') {
-      return sendJson(req, res, { ok: true, aircraft: air.size, ships: sea.size, airframes: acdb.status, watching: watching(), sources: sources() });
+      const h = health();
+      return await sendJson(req, res, h, false, h.ok ? 200 : 503);
     }
-    // Static files (production build).
-    if (!existsSync(DIST)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      return res.end('No build found. Run `npm run build`, or use `npm run dev` and open the Vite URL.');
-    }
-    let file = normalize(join(DIST, decodeURIComponent(p)));
-    if (!file.startsWith(DIST)) { res.writeHead(403); return res.end(); }
-    if (!existsSync(file) || statSync(file).isDirectory()) file = join(DIST, 'index.html');
-    const ext = extname(file);
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] ?? 'application/octet-stream',
-      'Cache-Control': p.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
-    });
-    createReadStream(file).pipe(res);
+    // Static files (production build), compressed once and kept in memory.
+    return await statics.serve(req, res, p);
   } catch (e) {
-    console.error(e);
-    if (!res.headersSent) res.writeHead(500);
-    res.end();
+    failed(res, e);
   }
-});
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`Watchman aggregator on http://localhost:${PORT}`);
   console.log(`  OpenSky: ${opensky.status.note}, every ${opensky.pollS}s while watched`);
   console.log(`  AISStream: ${aisstream.enabled ? 'on' : 'off (no AISSTREAM_API_KEY)'}`);
+  statics.warm().then((n) => { if (n) console.log(`  Site: ${n} files compressed`); }, (e) => console.warn('[static]', e));
 });
 
 function loadDotEnv(path: string) {
