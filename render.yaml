@@ -6,7 +6,7 @@ services:
     plan: free
     branch: claude/practical-mccarthy-yfijni
     buildCommand: npm ci --include=dev && npm run build
-    startCommand: node server/index.ts
+    startCommand: node --max-old-space-size=384 server/index.ts
     healthCheckPath: /healthz
     envVars:
       - key: NODE_VERSION

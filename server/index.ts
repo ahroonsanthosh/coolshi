@@ -268,6 +268,9 @@ every(() => 1800, () => launches.poll());
 setInterval(() => { air.sweep(); sea.sweep(); }, 5000);
 setInterval(() => {
   for (const [k, v] of views) if (Date.now() - v.seen > 120_000) views.delete(k);
+  // A job not run for an hour is due whether or not it is remembered; view
+  // points come and go with every pan, so forget them.
+  for (const [k, t] of lastRun) if (Date.now() - t > 3_600_000) lastRun.delete(k);
 }, 30_000);
 
 // ---------------------------------------------------------------------------
