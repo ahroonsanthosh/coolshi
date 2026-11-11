@@ -236,20 +236,26 @@ function windsCached() {
 }
 
 // Airport weather: the latest METAR from aviationweather.gov (NOAA), decoded
-// by them into fields, cached five minutes.
-const metarCache = new Map<string, { t: number; v: unknown }>();
-async function metar(icao: string): Promise<unknown> {
+// by them into fields, cached five minutes; a failed lookup is remembered
+// for three, and a lookup already under way is shared.
+const metarCache = new Map<string, { until: number; v: unknown }>();
+const metarWait = new Map<string, Promise<unknown>>();
+function metar(icao: string): Promise<unknown> {
   const c = metarCache.get(icao);
-  if (c && Date.now() - c.t < 300_000) return c.v;
-  try {
-    const { data } = await getJson<any[]>(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {}, 10_000);
-    const v = data?.[0] ?? null;
-    metarCache.set(icao, { t: Date.now(), v });
-    if (metarCache.size > 1000) metarCache.clear();
-    return v;
-  } catch {
-    return null;
+  if (c && Date.now() < c.until) return Promise.resolve(c.v);
+  let p = metarWait.get(icao);
+  if (!p) {
+    p = getJson<any[]>(`https://aviationweather.gov/api/data/metar?ids=${icao}&format=json`, {}, 10_000)
+      .then(({ data }) => ({ v: data?.[0] ?? null, ttl: 300_000 }), () => ({ v: null, ttl: 180_000 }))
+      .then(({ v, ttl }) => {
+        if (metarCache.size >= 1000) metarCache.clear();
+        metarCache.set(icao, { until: Date.now() + ttl, v });
+        return v;
+      })
+      .finally(() => metarWait.delete(icao));
+    metarWait.set(icao, p);
   }
+  return p;
 }
 
 let statsCache = { t: 0, v: sea.stats() };
@@ -261,8 +267,7 @@ function shipStats() {
 function sources() {
   let est = 0;
   for (const r of air.values()) if (r[14] & AF.est) est++;
-  estimator.status.count = est;
-  estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
+  estimator.active = est;
   return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, metars.status, clouds.status, iss.status, spacecraft.status, launches.status, news.status]
     .map((s) => s.toJSON());
 }

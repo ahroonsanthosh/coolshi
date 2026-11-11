@@ -8,6 +8,8 @@ import { SRC } from '../../shared/protocol.ts';
 import { getJson, Status } from './http.ts';
 
 const NA_SOG = 102.3;
+/** AISStream sends many messages a second worldwide; this long without one is a dead socket. */
+const STALL_MS = 90_000;
 
 /** AIS ETA bits (month, day, hour, minute) → "MM-DD HH:MM" UTC, or "". */
 export function decodeEta(v: number): string {
@@ -110,7 +112,22 @@ export class AisStream {
       return;
     }
     const ws = new WebSocket('wss://stream.aisstream.io/v0/stream');
+    let heard = Date.now();
+    let over = false;
+    // One reconnect per socket, whether it closed or went quiet. A
+    // half-open connection never closes on its own, so a watchdog checks.
+    const reconnect = (why: string) => {
+      if (over) return;
+      over = true;
+      clearInterval(dog);
+      this.status.fail(new Error(why));
+      try { ws.close(); } catch { /* already closing */ }
+      setTimeout(() => this.start(ingest), this.backoff * 1000);
+      this.backoff = Math.min(120, this.backoff * 2);
+    };
+    const dog = setInterval(() => { if (Date.now() - heard > STALL_MS) reconnect('no data for 90 s; reconnecting'); }, 15_000);
     ws.addEventListener('open', () => {
+      heard = Date.now();
       this.backoff = 2;
       ws.send(JSON.stringify({
         APIKey: this.key,
@@ -119,6 +136,7 @@ export class AisStream {
       }));
     });
     ws.addEventListener('message', async (ev) => {
+      heard = Date.now();
       try {
         const text = typeof ev.data === 'string' ? ev.data : await (ev.data as Blob).text();
         const m = JSON.parse(text);
@@ -166,11 +184,7 @@ export class AisStream {
         /* skip malformed message */
       }
     });
-    ws.addEventListener('close', () => {
-      this.status.fail(new Error('disconnected'));
-      setTimeout(() => this.start(ingest), this.backoff * 1000);
-      this.backoff = Math.min(120, this.backoff * 2);
-    });
+    ws.addEventListener('close', () => reconnect('disconnected'));
     ws.addEventListener('error', () => { /* close follows */ });
   }
 }
