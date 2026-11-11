@@ -42,6 +42,25 @@ export class TokenBucket {
   wait(now = Date.now(), n = 1) { this.fill(now); return this.tokens >= n ? 0 : (n - this.tokens) / this.rate; }
 }
 
+/**
+ * The address to hold a client to. Behind a proxy every connection comes
+ * from the proxy, which appends the address it saw to X-Forwarded-For;
+ * only entries our own proxies added can be believed (anything before them
+ * is whatever the client sent). So: the entry `hops` from the end (1, the
+ * first hop, for Render), and only when the connection itself comes from a
+ * private address. A server facing the internet directly ignores the header.
+ */
+export function clientIp(peer: string, xff: string | string[] | undefined, hops = 1): string {
+  if (!hops || !xff || !isPrivate(peer)) return peer;
+  const list = String(xff).split(',').map((s) => s.trim()).filter(Boolean);
+  return list.length ? list[Math.max(0, list.length - hops)] : peer;
+}
+
+function isPrivate(a: string): boolean {
+  const v4 = a.replace(/^::ffff:/i, '');
+  return /^(10|127)\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\.|^169\.254\./.test(v4) || a === '::1' || /^f[cd]|^fe80:/i.test(a);
+}
+
 /** One bucket per key (a client address), forgotten once idle and full. */
 export class KeyedLimiter {
   private m = new Map<string, TokenBucket>();

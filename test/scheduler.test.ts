@@ -159,3 +159,14 @@ test('views: a few per address, a cap in all, and a thousand fake ids stay cheap
   assert.ok(of.size > 0);
   assert.ok(ms < 100, `${ms.toFixed(1)} ms to plan 200 views`);
 });
+
+test('client address: X-Forwarded-For believed only from our own proxy, first hop only', async () => {
+  const { clientIp } = await import('../server/pacing.ts');
+  assert.equal(clientIp('10.1.2.3', '203.0.113.9'), '203.0.113.9', 'Render proxy: the address it saw');
+  assert.equal(clientIp('10.1.2.3', '6.6.6.6, 203.0.113.9'), '203.0.113.9', 'a forged entry before it is ignored');
+  assert.equal(clientIp('::ffff:172.20.0.1', '203.0.113.9'), '203.0.113.9');
+  assert.equal(clientIp('198.51.100.7', '6.6.6.6'), '198.51.100.7', 'no proxy in front: the header is ignored');
+  assert.equal(clientIp('10.1.2.3', '1.1.1.1, 203.0.113.9', 2), '1.1.1.1');
+  assert.equal(clientIp('10.1.2.3', '203.0.113.9', 0), '10.1.2.3');
+  assert.equal(clientIp('10.1.2.3', undefined), '10.1.2.3');
+});

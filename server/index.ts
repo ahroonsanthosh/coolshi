@@ -18,6 +18,7 @@ import { OpenWaters } from './feeds/openwaters.ts';
 import { sweepGrid } from './grid.ts';
 import { AdsbScheduler, LANE_RATES, type Job } from './scheduler.ts';
 import { ViewRegistry } from './views.ts';
+import { clientIp, KeyedLimiter } from './pacing.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
@@ -186,6 +187,7 @@ setInterval(() => { air.sweep(); sea.sweep(); }, 5000);
 setInterval(() => {
   views.prune();
   sched.prune();
+  for (const l of [apiLimit, fullLimit, lookupLimit]) l.prune();
 }, 30_000);
 
 // ---------------------------------------------------------------------------
@@ -208,9 +210,10 @@ async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, bod
     if (shared && body && typeof body === 'object') packed.set(body, pk);
   }
   const raw = pk.raw;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*',
-  };
+  // No Access-Control-Allow-Origin: the app is same-origin, and the
+  // volunteer networks' data is theirs to publish, not ours to re-serve to
+  // any website that asks.
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
   if (raw.length > 1024 && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
     const z = pk.z ?? (pk.z = await gz(raw, { level: 6 }));
     res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': z.length });
@@ -283,12 +286,46 @@ function failed(res: http.ServerResponse, e: unknown) {
   res.end();
 }
 
+// ---------------------------------------------------------------------------
+// Limits per client address. Generous for a browser (it polls a few
+// endpoints every few seconds), firm for a script.
+
+/** Any /api/ request: 20 a second, bursts of 60. */
+const apiLimit = new KeyedLimiter(20, 60);
+/** Whole aircraft snapshots (since=0), the most expensive answer: three, then one per 10 s. */
+const fullLimit = new KeyedLimiter(0.1, 3);
+/** Lookups that cost an upstream request (METAR, ship particulars). */
+const lookupLimit = new KeyedLimiter(1, 10);
+
+// The client's address, from X-Forwarded-For's first hop behind Render's
+// proxy (see clientIp). TRUST_PROXY_HOPS=0 ignores the header; 2 if
+// another proxy sits in front. Logged once so a deploy can check it.
+const PROXY_HOPS = Math.max(0, Number(process.env.TRUST_PROXY_HOPS ?? 1) || 0);
+let xffNoted = false;
+function ipOf(req: http.IncomingMessage): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff && !xffNoted) {
+    xffNoted = true;
+    console.log(`  X-Forwarded-For from ${req.socket.remoteAddress}: ${String(xff).split(',').length} entries; trusting the last ${PROXY_HOPS}`);
+  }
+  return clientIp(req.socket.remoteAddress ?? '', xff, PROXY_HOPS);
+}
+
+function tooMany(res: http.ServerResponse, retryS: number) {
+  res.writeHead(429, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Retry-After': String(retryS) });
+  res.end('{"error":"too many requests"}');
+}
+
 async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
   try {
     const url = new URL(req.url ?? '/', 'http://x');
     const p = url.pathname;
+    const ip = ipOf(req);
+    if (p.startsWith('/api/') && !apiLimit.take(ip)) return tooMany(res, apiLimit.retryAfter(ip));
+    if (/^\/api\/(metar|detail\/sea)\//.test(p) && !lookupLimit.take(ip)) return tooMany(res, lookupLimit.retryAfter(ip));
     if (p === '/api/air') {
-      registerView(url.searchParams.get('c'), url.searchParams.get('vp'), req.socket.remoteAddress ?? '');
+      registerView(url.searchParams.get('c'), url.searchParams.get('vp'), ip);
+      if (!Number(url.searchParams.get('since')) && !fullLimit.take(ip)) return tooMany(res, fullLimit.retryAfter(ip));
       return sendJson(req, res, air.delta(Number(url.searchParams.get('since')) || 0));
     }
     if (p === '/api/sea') {
