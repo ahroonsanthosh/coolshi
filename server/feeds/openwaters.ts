@@ -16,6 +16,18 @@ const GAP_MS = 800; // 75 requests a minute, comfortably under the 120 allowed
 
 interface Box { s: number; w: number; n: number; e: number; next: number; count: number }
 
+/** One ship's registry particulars and its last day of track. */
+export interface ShipDetail {
+  particulars: unknown; firstSeen: string | null; near: string | null;
+  track: { coords: [number, number][]; times: string[]; sog: (number | null)[] } | null;
+}
+const NO_DETAIL: ShipDetail = { particulars: null, firstSeen: null, near: null, track: null };
+const DETAIL_TTL_MS = 120_000;
+const DETAIL_FAIL_TTL_MS = 60_000;
+const DETAIL_CACHE = 500;
+const DETAIL_QUEUE = 10;
+const DETAIL_WAIT_MS = 20_000;
+
 const VIA: Record<string, string> = {
   aishub: 'AISHub', aisstream: 'aisstream.io', barentswatch: 'BarentsWatch', kystverket: 'Kystverket', digitraffic: 'Fintraffic',
 };
@@ -29,6 +41,14 @@ export class OpenWaters {
   focus: { s: number; w: number; n: number; e: number }[] = [];
   private focusNext = new Map<string, number>();
   ships = 0;
+  readonly enabled = process.env.OPENWATERS !== 'off';
+  // Ship particulars asked for by viewers, fetched in the sweep's turn so
+  // they share its budget: anyone can ask for any MMSI, and each costs two
+  // requests of the 120 a minute Open Waters allows anonymous callers.
+  private detailCache = new Map<number, { until: number; v: ShipDetail }>();
+  private detailWait = new Map<number, Promise<ShipDetail>>();
+  private detailQueue: { mmsi: number; resolve: (v: ShipDetail) => void }[] = [];
+  private sweepsSinceDetail = 2;
 
   /** `ports`: [lat, lon] of places ships gather, to order the first sweep. */
   constructor(ports: [number, number][]) {
@@ -54,9 +74,28 @@ export class OpenWaters {
     return best ? { ...best, box: best } : null;
   }
 
-  async tick(ingest: (r: ShipReport) => void): Promise<number> {
+  /** Viewer requests waiting for a turn. */
+  get queued() { return this.detailQueue.length; }
+
+  /**
+   * One request's turn: a waiting ship detail (at most every third turn,
+   * so viewers can take half the requests but never the sweep's share), or
+   * the next box of the sweep when `sweep` (someone is watching).
+   */
+  async tick(ingest: (r: ShipReport) => void, sweep = true): Promise<number> {
     const now = Date.now();
-    if (this.backoff > now) return (this.backoff - now) / 1000;
+    if (this.backoff > now) {
+      for (const d of this.detailQueue.splice(0)) d.resolve(NO_DETAIL);
+      return (this.backoff - now) / 1000;
+    }
+    if (this.detailQueue.length && (this.sweepsSinceDetail >= 2 || !sweep)) {
+      const d = this.detailQueue.shift()!;
+      this.sweepsSinceDetail = 0;
+      d.resolve(await this.fetchDetail(d.mmsi));
+      return (2 * GAP_MS) / 1000; // it took two requests
+    }
+    if (!sweep) return 1;
+    this.sweepsSinceDetail++;
     const q = this.pick(now);
     if (!q) return GAP_MS / 1000;
     const url = `${API}?bbox=${q.s},${q.w},${q.n},${q.e}&max_age=6h&max_age_moving=30m&kind=vessel`;
@@ -96,31 +135,50 @@ export class OpenWaters {
     }
     return GAP_MS / 1000;
   }
-}
 
-/** One ship's registry particulars and its last day of track, cached. */
-const shipCache = new Map<number, { t: number; v: unknown }>();
-export async function shipDetail(mmsi: number): Promise<unknown> {
-  const c = shipCache.get(mmsi);
-  if (c && Date.now() - c.t < 120_000) return c.v;
-  const token = process.env.OPENWATERS_TOKEN ?? '';
-  const h: Record<string, string> = { 'User-Agent': 'Watchman/1.0' };
-  if (token) h.Authorization = `Bearer ${token}`;
-  const id = String(mmsi).padStart(9, '0');
-  const from = new Date(Date.now() - 24 * 3600_000).toISOString().replace(/\.\d+Z$/, 'Z');
-  const get = (u: string) => fetch(u, { headers: h }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-  const [d, t] = await Promise.all([
-    get(`https://ais.openwaters.io/v1/vessels/${id}`),
-    get(`https://ais.openwaters.io/v1/vessels/${id}/track?from=${from}`),
-  ]) as [any, any];
-  const p = d?.properties ?? {};
-  const v = {
-    particulars: p.particulars ?? null, firstSeen: p.first_seen ?? null, near: p.near ?? null,
-    track: t?.geometry?.type === 'LineString'
-      ? { coords: t.geometry.coordinates as [number, number][], times: (t.properties?.times ?? []) as string[], sog: (t.properties?.sog ?? []) as (number | null)[] }
-      : null,
-  };
-  shipCache.set(mmsi, { t: Date.now(), v });
-  if (shipCache.size > 500) shipCache.clear();
-  return v;
+  /** A ship's particulars and track: cached, shared while in flight, paced with the sweep. */
+  detail(mmsi: number, now = Date.now()): Promise<ShipDetail> {
+    const c = this.detailCache.get(mmsi);
+    if (c && c.until > now) return Promise.resolve(c.v);
+    const w = this.detailWait.get(mmsi);
+    if (w) return w;
+    if (!this.enabled || this.backoff > now || this.detailQueue.length >= DETAIL_QUEUE) return Promise.resolve(NO_DETAIL);
+    const p = new Promise<ShipDetail>((resolve) => {
+      const item = { mmsi, resolve };
+      this.detailQueue.push(item);
+      // Not reached in time (a long queue, the loop paused): answer empty.
+      setTimeout(() => {
+        const i = this.detailQueue.indexOf(item);
+        if (i >= 0) { this.detailQueue.splice(i, 1); resolve(NO_DETAIL); }
+      }, DETAIL_WAIT_MS).unref();
+    }).finally(() => this.detailWait.delete(mmsi));
+    this.detailWait.set(mmsi, p);
+    return p;
+  }
+
+  private async fetchDetail(mmsi: number): Promise<ShipDetail> {
+    const id = String(mmsi).padStart(9, '0');
+    const from = new Date(Date.now() - 24 * 3600_000).toISOString().replace(/\.\d+Z$/, 'Z');
+    const init = this.token ? { headers: { Authorization: `Bearer ${this.token}` } } : {};
+    let failed = false;
+    const get = (u: string) => getJson<any>(u, init, 15_000).then((r) => r.data, (e) => {
+      if (e instanceof HttpError && e.status === 404) return null; // not a ship it knows: an answer
+      failed = true;
+      if (e instanceof HttpError && e.status === 429) this.backoff = Date.now() + Math.max(60, e.retryAfter ?? 0) * 1000;
+      return null;
+    });
+    const [d, t] = await Promise.all([get(`${API}/${id}`), get(`${API}/${id}/track?from=${from}`)]);
+    const p = d?.properties ?? {};
+    const v: ShipDetail = {
+      particulars: p.particulars ?? null, firstSeen: p.first_seen ?? null, near: p.near ?? null,
+      track: t?.geometry?.type === 'LineString'
+        ? { coords: t.geometry.coordinates, times: t.properties?.times ?? [], sog: t.properties?.sog ?? [] }
+        : null,
+    };
+    // A failure is remembered briefly, so a broken ship isn't asked for on every click.
+    this.detailCache.delete(mmsi);
+    this.detailCache.set(mmsi, { until: Date.now() + (failed ? DETAIL_FAIL_TTL_MS : DETAIL_TTL_MS), v });
+    for (const k of this.detailCache.keys()) { if (this.detailCache.size <= DETAIL_CACHE) break; this.detailCache.delete(k); }
+    return v;
+  }
 }

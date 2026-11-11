@@ -14,7 +14,7 @@ import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
 import { parseReadsb, type Provider } from './feeds/readsb.ts';
 import { Kystverket, ownAisFeeds } from './feeds/kystverket.ts';
-import { OpenWaters, shipDetail } from './feeds/openwaters.ts';
+import { OpenWaters } from './feeds/openwaters.ts';
 import { sweepGrid } from './grid.ts';
 import { AdsbScheduler, LANE_RATES, type Job } from './scheduler.ts';
 import { ViewRegistry } from './views.ts';
@@ -149,8 +149,9 @@ for (const f of ownAir) {
   });
 }
 every(() => 0.8, async () => {
-  if (process.env.OPENWATERS === 'off') return 3600;
-  if (!watching()) return 5;
+  if (!openwaters.enabled) return 3600;
+  // Nobody watching: no sweep, but a ship's details still get their turn.
+  if (!watching()) return openwaters.tick((r) => sea.ingest(r), false);
   // Viewers' views first: the 10° boxes their screens overlap, if few.
   const focus: { s: number; w: number; n: number; e: number }[] = [];
   for (const v of views.active()) {
@@ -302,7 +303,7 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     let m = p.match(/^\/api\/detail\/air\/([0-9a-f~]{6,7})$/i);
     if (m) return await sendJson(req, res, air.extras(m[1].toLowerCase()));
     m = p.match(/^\/api\/detail\/sea\/(\d{6,9})$/);
-    if (m) return await sendJson(req, res, await shipDetail(Number(m[1])));
+    if (m) return await sendJson(req, res, await openwaters.detail(Number(m[1])));
     if (p === '/api/winds') return await sendJson(req, res, windsCached());
     if (p === '/api/weather') return await sendJson(req, res, weatherBody(), true);
     if (p === '/api/space') {
