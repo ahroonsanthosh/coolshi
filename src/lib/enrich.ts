@@ -40,14 +40,10 @@ export function airframe(hex: string): Promise<Airframe | null> {
 export interface Photo { src: string; link: string; credit: string }
 export function aircraftPhoto(hex: string, reg: string): Promise<Photo | null> {
   return once(`ph:${hex}`, async () => {
-    const pick = (j: any): Photo | null => {
-      const p = j?.photos?.[0];
-      if (!p) return null;
-      return { src: p.thumbnail_large?.src ?? p.thumbnail?.src, link: p.link, credit: `© ${p.photographer} · Planespotters.net` };
-    };
-    let p = pick(await json(`https://api.planespotters.net/pub/photos/hex/${hex}`));
-    if (!p && reg) p = pick(await json(`https://api.planespotters.net/pub/photos/reg/${encodeURIComponent(reg)}`));
-    return p;
+    // Looked up by our server (Planespotters refuses browsers); the image
+    // itself still loads from Planespotters, linked to its page.
+    const p = await json(`/api/photo/air/${hex}${reg ? `?reg=${encodeURIComponent(reg)}` : ''}`);
+    return p?.src ? { src: p.src, link: p.link, credit: `© ${p.photographer} · Planespotters.net` } : null;
   });
 }
 

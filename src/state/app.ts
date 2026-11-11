@@ -4,18 +4,19 @@
 import type { AcClass } from '../lib/aircraft.ts';
 
 export type LayerKey =
-  | 'aircraft' | 'ships' | 'labels' | 'airports' | 'quakes' | 'disasters' | 'news' | 'iss' | 'space' | 'radar' | 'night' | 'trails' | 'winds';
+  | 'aircraft' | 'ships' | 'labels' | 'airports' | 'quakes' | 'disasters' | 'news' | 'iss' | 'space' | 'radar' | 'night' | 'trails' | 'winds'
+  | 'weather' | 'clouds' | 'hazards';
 
 export type AcFilter = AcClass | 'ground' | 'military';
 
 export interface Selection {
-  kind: 'air' | 'sea' | 'quake' | 'disaster' | 'airport' | 'iss' | 'news' | 'sat' | 'launch';
+  kind: 'air' | 'sea' | 'quake' | 'disaster' | 'airport' | 'iss' | 'news' | 'sat' | 'launch' | 'wx' | 'hazard';
   id: string;
 }
 
-const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
+export const DEFAULT_LAYERS: Record<LayerKey, boolean> = {
   aircraft: true, ships: true, labels: true, airports: true, quakes: true, disasters: true, news: true, iss: true, space: true,
-  radar: false, night: true, trails: true, winds: false,
+  radar: false, night: true, trails: true, winds: false, weather: false, clouds: false, hazards: false,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -53,6 +54,11 @@ class AppState {
     save('wf.layers', this.layers);
     this.emit('layers');
   }
+  /** Layers from a shared link: shown, but not saved as this viewer's own. */
+  applyLayers(l: Partial<Record<LayerKey, boolean>>) {
+    Object.assign(this.layers, l);
+    this.emit('layers');
+  }
   /** Show only military aircraft (everything else on the map stays). */
   milOnly = load<{ v: boolean }>('wf.milOnly', { v: false }).v;
   setMilOnly(v: boolean) {
@@ -72,8 +78,6 @@ class AppState {
     if (!s) this.follow = false;
     this.emit('selection');
     this.emit('follow');
-    const hash = s && (s.kind === 'air' || s.kind === 'sea') ? `#${s.id}` : ' ';
-    try { history.replaceState(null, '', hash === ' ' ? location.pathname + location.search : hash); } catch { /* ignore */ }
   }
   setHover(s: Selection | null) {
     if (s?.id === this.hover?.id) return;

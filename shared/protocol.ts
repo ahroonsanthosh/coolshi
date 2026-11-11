@@ -41,6 +41,9 @@ export type ShipRow = [
 
 export interface Delta<R> {
   now: number; // server ms
+  /** Change cursor: send it back as `since` to get only what changed after
+   * it. Starts from the server's boot time, so a restart forces a full send. */
+  seq: number;
   full: boolean;
   rows: R[];
   removed: (string | number)[];
@@ -94,3 +97,50 @@ export interface Launch {
   lat: number; lon: number; image: string; crewed: boolean; webcast: boolean;
 }
 export interface SpacePayload { now: number; sats: SatTle[]; launches: Launch[] }
+
+/**
+ * Weather observed at a station (METAR), compact for the wire.
+ * [station, lat, lon, observed (unix s), temp °C, dew point °C,
+ *  wind from ° true (-1 variable), wind kt, gust kt, visibility statute mi,
+ *  present weather (METAR codes, e.g. "-RA BR")]
+ */
+export type WxRow = [
+  string, number, number, number, number | null, number | null,
+  number | null, number | null, number | null, number | null, string,
+];
+export const WX = { id: 0, lat: 1, lon: 2, t: 3, temp: 4, dew: 5, wdir: 6, wspd: 7, gust: 8, vis: 9, wx: 10 } as const;
+export interface WeatherPayload {
+  /** When the server last fetched the station file, ms. */
+  at: number;
+  stations: WxRow[];
+  /** The newest global infrared cloud image (ms), or null if unknown. */
+  clouds: number | null;
+}
+
+/** A SIGMET: a warning to aircraft of weather dangerous to all of them,
+ * valid for an area, a band of levels and a few hours. */
+export interface Hazard {
+  id: string;
+  kind: 'storm' | 'turb' | 'ice' | 'ash' | 'cyclone' | 'wave' | 'dust' | 'other';
+  /** In words: "severe turbulence", "embedded thunderstorms". */
+  label: string;
+  /** Who issued it: flight information region, or the US desk. */
+  area: string;
+  from: number; to: number;
+  /** Feet; null base is the surface, null top no stated limit. */
+  base: number | null; top: number | null;
+  raw: string;
+  /** Outer rings, [lon, lat]. */
+  rings: [number, number][][];
+}
+export interface HazardPayload { at: number; items: Hazard[] }
+
+/** Replay: snapshots of every track, kept on the server for a few hours. */
+export interface ReplayIndex { step: number; frames: number[] }
+/** One snapshot. Aircraft: [hex, lat, lon, alt ft | null, track ° | null, flags].
+ * Ships: [mmsi, lat, lon, course ° | null, moving 0/1]. */
+export interface ReplayFrame {
+  t: number;
+  air: [string, number, number, number | null, number | null, number][];
+  sea: [number, number, number, number | null, number][];
+}

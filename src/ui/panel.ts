@@ -1,7 +1,7 @@
 // The details sheet. Every number on it says where it came from and how old
 // it is; anything we can't verify is left out rather than guessed.
 
-import { A, AF, S, SRC_NAMES, type HistoryPoint, type Quake, type Disaster, type NewsItem } from '../../shared/protocol.ts';
+import { A, AF, S, SRC_NAMES, WX, type HistoryPoint, type Quake, type Disaster, type NewsItem } from '../../shared/protocol.ts';
 import { distance } from '../../shared/geo.ts';
 import { news } from '../state/news.ts';
 import { space, countdown, SAT_KIND_LABEL } from '../state/space.ts';
@@ -13,7 +13,11 @@ import { flagState, NAV_STATUS, shipType } from '../lib/ais.ts';
 import * as F from '../lib/format.ts';
 import { aircraftPhoto, airframe, airline, checkRoute, route, shipFacts, type Route } from '../lib/enrich.ts';
 import { silhouetteSvg } from '../map/icons.ts';
-import { altColor } from '../map/colors.ts';
+import { altColor, tempColor } from '../map/colors.ts';
+import { weather } from '../state/weather.ts';
+import { isWatched, toggleWatched } from '../state/watch.ts';
+import { HAZARD_COLOR, hazards, hazardsAt, levels, loadHazards } from '../state/hazards.ts';
+import { humidity, wxKind, wxWords } from '../lib/weather.ts';
 import { isaTemp } from '../state/winds.ts';
 import { AIRPORTS, currentHistory, flyTo, getMap, issNow, onHistory, setRoute } from '../map/mapView.ts';
 
@@ -39,6 +43,8 @@ export function initPanel() {
     if (!t) return;
     const act = t.dataset.act;
     if (act === 'close') app.select(null);
+    if (act === 'watch') toggleWatch(t);
+    if (act === 'hazard') app.select({ kind: 'hazard', id: t.dataset.id! });
     if (act === 'follow') {
       app.setFollow(!app.follow);
       const tr = app.selection && picture.get(app.selection.id);
@@ -49,25 +55,62 @@ export function initPanel() {
       flyTo(lon, lat, Number(t.dataset.z) || undefined);
     }
     if (act === 'airport') app.select({ kind: 'airport', id: t.dataset.id! });
+    if (act === 'pick-air') { const a = picture.aircraft.get(t.dataset.id!); if (a) { app.select({ kind: 'air', id: a.id }); flyTo(a.x, a.y, 8); } }
     if (act === 'copy') {
       navigator.clipboard?.writeText(location.href).then(() => { t.textContent = 'Link copied'; }).catch(() => {});
     }
   });
 }
 
+const watchBtn = (id: string, label: string) =>
+  `<button class="btn" data-act="watch" data-id="${F.esc(id)}" data-label="${F.esc(label)}" aria-pressed="${isWatched(id)}">${isWatched(id) ? 'Watching' : 'Watch'}</button>`;
+
+function toggleWatch(b: HTMLElement) {
+  const on = toggleWatched(b.dataset.id!, b.dataset.label!);
+  b.setAttribute('aria-pressed', String(on));
+  b.textContent = on ? 'Watching' : 'Watch';
+  // Ask once, from the click, so background alerts can reach the system.
+  if (on && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+}
+
 function open(html: string) {
   el.innerHTML = html;
   el.classList.add('open');
+  el.inert = false;
   document.body.classList.add('panel-open');
   el.scrollTop = 0;
 }
 function close() {
   el.classList.remove('open');
+  // Out of sight is out of the tab order and the accessibility tree too.
+  el.inert = true;
   document.body.classList.remove('panel-open');
   renderedFor = '';
 }
 
+/** When a track drops out of the feed, say so and keep counting its age,
+ * rather than leaving "8 s ago" frozen on the sheet. */
+function lostBanner(posT: number | null) {
+  let b = el.querySelector<HTMLElement>('.lost');
+  if (posT === null) { b?.remove(); return; }
+  if (!b) {
+    b = document.createElement('div');
+    b.className = 'lost';
+    b.setAttribute('role', 'status');
+    el.querySelector('.p-head')?.after(b);
+  }
+  b.textContent = `No longer being tracked · last report ${F.ago(Date.now() / 1000 - posT)}. It may have landed, docked or left receiver range.`;
+}
+
 function render() {
+  const was = renderedFor;
+  renderNow();
+  // A new selection: move focus to the sheet so keyboard and screen reader
+  // users land on it (without scrolling the page under a finger).
+  if (renderedFor && renderedFor !== was) el.focus({ preventScroll: true });
+}
+
+function renderNow() {
   clearInterval(tick);
   redrawNews = () => {};
   currentRoute = null;
@@ -101,6 +144,11 @@ function render() {
   } else if (s.kind === 'launch') {
     const l = space.launches.find((x) => x.id === s.id);
     if (l) renderLaunch(s.id); else close();
+  } else if (s.kind === 'wx') {
+    renderStation(s.id);
+  } else if (s.kind === 'hazard') {
+    const h = hazards.items.find((x) => x.id === s.id);
+    if (h) renderHazard(h); else { close(); loadHazards().then(() => { if (app.selection?.id === s.id && hazards.items.some((x) => x.id === s.id)) render(); }); }
   }
 }
 
@@ -229,8 +277,10 @@ function renderAircraft(a: Aircraft) {
       <div class="sub" id="ac-sub">${F.esc(desc || r[A.type] || 'Type not broadcast')}</div>
       <div class="sub2" id="ac-sub2">${[r[A.reg], r[A.owner]].filter(Boolean).map(F.esc).join(' · ')}</div>
       ${chips}
+      <div id="hz-flag"></div>
     </div>
     <div id="route"></div>
+    <div id="dest-wx"></div>
     <div class="grid">
       ${cell('Altitude', '', '', '', 'alt')}
       ${cell('Vertical', '', '', '', 'vr')}
@@ -247,16 +297,22 @@ function renderAircraft(a: Aircraft) {
     <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
+      ${watchBtn(a.id, r[A.cs] || r[A.reg] || hex.toUpperCase())}
       <a class="btn" href="https://globe.adsb.fi/?icao=${hex}" target="_blank" rel="noopener">adsb.fi ↗</a>
       <button class="btn" data-act="copy">Copy link</button>
     </div>
     <div class="prov" id="prov"></div>
   `);
   updateAircraft();
+  loadHazards().then(() => { if (renderedFor === `air:${a.id}`) drawHazardFlag(picture.aircraft.get(a.id) ?? a); });
   let n = 0;
+  let lastPos = a.posT;
   tick = window.setInterval(() => {
-    const cur = app.selection && picture.aircraft.get(app.selection.id);
-    if (!cur || renderedFor !== `air:${cur.id}`) return;
+    if (renderedFor !== `air:${a.id}`) return;
+    const cur = picture.aircraft.get(a.id);
+    if (!cur) { lostBanner(lastPos); return; }
+    lostBanner(null);
+    lastPos = cur.posT;
     updateAircraft();
     if (++n % 5 === 0) loadDeck(cur);
   }, 1000);
@@ -277,9 +333,21 @@ function acNewsTerms(a: Aircraft): string[] {
   return [...t];
 }
 
+/** Is this aircraft inside a SIGMET in force, at its levels? */
+function drawHazardFlag(a: Aircraft) {
+  const box = el.querySelector<HTMLElement>('#hz-flag');
+  if (!box) return;
+  const r = a.row;
+  const alt = r[A.alt] ?? r[A.altGeom];
+  const inside = (r[A.flags] & AF.ground) || alt === null ? [] : hazardsAt(a.x, a.y, alt);
+  const html = inside.map((h) => `<button class="chip hz" data-act="hazard" data-id="${F.esc(h.id)}" style="--hz:${HAZARD_COLOR[h.kind]}">In a SIGMET: ${F.esc(h.label)}, ${F.esc(levels(h))}</button>`).join('');
+  if (box.dataset.sig !== html) { box.innerHTML = html; box.dataset.sig = html; }
+}
+
 function updateAircraft() {
   const a = app.selection && picture.aircraft.get(app.selection.id);
   if (!a) return;
+  drawHazardFlag(a);
   const r = a.row;
   const ground = (r[A.flags] & AF.ground) !== 0;
   const alt = r[A.alt];
@@ -445,6 +513,7 @@ function drawRouteBlock(a: Aircraft, rt: Route) {
     return;
   }
   setRoute({ from: [rt.from.lat, rt.from.lon, rt.from.iata || rt.from.icao], to: [rt.to.lat, rt.to.lon, rt.to.iata || rt.to.icao] });
+  if (!ground) loadDestWx(a.id, rt.to.icao, rt.to.iata || rt.to.icao);
   const gs = r[A.gs] ?? 0;
   let eta = '';
   if (!ground && gs > 80 && chk.remaining > 5000) {
@@ -541,14 +610,19 @@ function renderShip(s: Ship) {
     <div id="news-rel"></div>
     <div class="actions">
       <button class="btn" data-act="follow" aria-pressed="${app.follow}">Follow</button>
+      ${watchBtn(s.id, r[S.name] || `MMSI ${r[S.mmsi]}`)}
       ${r[S.imo] ? `<a class="btn" href="https://www.marinetraffic.com/en/ais/details/ships/imo:${r[S.imo]}" target="_blank" rel="noopener">MarineTraffic ↗</a>` : ''}
       <button class="btn" data-act="copy">Copy link</button>
     </div>
     <div class="prov">Reported over AIS, heard by <b>${F.esc(srcNames(r[S.src]))}</b>${r[S.via] ? ` (relayed from ${F.esc(r[S.via])})` : ''}. Moving ships are carried forward on their course for up to ten minutes between reports. Type, size, destination and draught are typed in by the crew and are often out of date.</div>
   `);
+  let lastPos = s.posT;
   const upd = () => {
-    const cur = app.selection && picture.ships.get(app.selection.id);
-    if (!cur) return;
+    if (renderedFor !== `sea:${s.id}`) return;
+    const cur = picture.ships.get(s.id);
+    if (!cur) { lostBanner(lastPos); return; }
+    lostBanner(null);
+    lastPos = cur.posT;
     const rr = cur.row;
     setCell('sog', rr[S.sog] === null ? '—' : `${F.n1(rr[S.sog]!)} kt`, rr[S.sog] === null ? '' : `${F.n1(rr[S.sog]! * 1.852)} km/h`);
     setCell('cog', F.heading(rr[S.cog]), F.compass(rr[S.cog]));
@@ -700,33 +774,107 @@ function renderAirport(icao: string) {
   }, `News from ${city || name}`);
 }
 
+/** One line of the destination's latest METAR under the route. */
+async function loadDestWx(id: string, icao: string, code: string) {
+  const box = el.querySelector<HTMLElement>('#dest-wx');
+  if (!box || box.dataset.for === icao) return;
+  box.dataset.for = icao;
+  let m: any = null;
+  try { m = await (await fetch(`/api/metar/${encodeURIComponent(icao)}`)).json(); } catch { return; }
+  if (!m || renderedFor !== `air:${id}` || !el.contains(box)) return;
+  const cat = CATS[m.fltCat];
+  const wind = m.wspd === 0 ? 'calm' : m.wspd != null ? `wind ${m.wdir === 'VRB' ? 'variable' : F.heading(Number(m.wdir))} ${m.wspd} kt${m.wgst ? ` gusting ${m.wgst}` : ''}` : '';
+  const bits = [m.temp != null ? `${m.temp} °C` : '', m.wxString ? wxWords(m.wxString) : '', wind].filter(Boolean).join(' · ');
+  box.innerHTML = `<div class="dest-wx"><span class="k">Weather at ${F.esc(code)} now</span>${cat ? `<span class="cat" style="background:${cat[0]}" title="${F.esc(cat[1])}">${F.esc(m.fltCat)}</span>` : ''}<span>${F.esc(bits)}</span><span class="age">observed ${F.ago(Date.now() / 1000 - m.obsTime)}</span></div>`;
+}
+
 // Flight categories as pilots use them, from ceiling and visibility.
 const CATS: Record<string, [string, string]> = {
   VFR: ['#2f9e44', 'Visual flight rules'], MVFR: ['#1c7ed6', 'Marginal VFR'], IFR: ['#e03131', 'Instrument flight rules'], LIFR: ['#ae3ec9', 'Low IFR'],
 };
 const COVER: Record<string, string> = { SKC: 'Clear', CLR: 'Clear', NCD: 'No cloud', NSC: 'No significant cloud', CAVOK: 'Clear, visibility OK', FEW: 'Few', SCT: 'Scattered', BKN: 'Broken', OVC: 'Overcast', VV: 'Sky obscured' };
 
-async function loadMetar(icao: string) {
+async function loadMetar(icao: string, label = 'Weather at the field') {
   let m: any = null;
   try { m = await (await fetch(`/api/metar/${icao}`)).json(); } catch { return; }
   const box = el.querySelector<HTMLElement>('#metar');
   if (!box || app.selection?.id !== icao || !m) return;
+  const nameEl = el.querySelector<HTMLElement>('#wx-name');
+  if (nameEl && m.name) nameEl.textContent = m.name;
   const cat = CATS[m.fltCat];
   const clouds = (m.clouds ?? []).map((c: any) => `${COVER[c.cover] ?? c.cover}${c.base != null ? ` ${F.n0(c.base)} ft` : ''}`).join(', ') || COVER[m.cover] || '—';
   const wind = m.wspd === 0 ? 'Calm' : `${m.wdir === 'VRB' ? 'Variable' : F.heading(Number(m.wdir))} at ${m.wspd} kt${m.wgst ? `, gusting ${m.wgst}` : ''}`;
   const vis = m.visib === '10+' || m.visib === '6+' ? `${m.visib === '6+' ? '10 km' : '10 mi'} or more` : `${m.visib} mi`;
   const age = (Date.now() / 1000 - m.obsTime);
   box.innerHTML = `
-    <div class="deck-h"><span>Weather at the field</span><span>observed ${F.ago(age)}</span></div>
+    <div class="deck-h"><span>${F.esc(label)}</span><span>observed ${F.ago(age)}</span></div>
     <div class="grid deck">
+      ${m.wxString ? cell('Weather', F.esc(cap(wxWords(m.wxString))), F.esc(m.wxString), 'wide') : ''}
       ${cell('Conditions', cat ? `<span class="cat" style="background:${cat[0]}">${F.esc(m.fltCat)}</span>` : '—', cat ? cat[1] : '')}
-      ${cell('Wind', F.esc(wind), m.wspd ? 'surface, magnetic' : '')}
-      ${cell('Visibility', F.esc(vis), '')}
+      ${cell('Wind', F.esc(wind), m.wspd ? 'blowing from, degrees true' : '')}
+      ${cell('Visibility', F.esc(vis), typeof m.visib === 'number' ? `${F.n1(m.visib * 1.609)} km` : '')}
       ${cell('Cloud', F.esc(clouds), '')}
-      ${cell('Temperature', m.temp != null ? `${m.temp} °C` : '—', m.dewp != null ? `dew point ${m.dewp} °C` : '')}
+      ${cell('Temperature', m.temp != null ? `${m.temp} °C` : '—', m.dewp != null ? `dew point ${m.dewp} °C${m.temp != null ? ` · humidity ${Math.round(humidity(m.temp, m.dewp))}%` : ''}` : '')}
       ${cell('Pressure', m.altim != null ? `${Math.round(m.altim)} hPa` : '—', m.altim != null ? `${(m.altim * 0.02953).toFixed(2)} inHg` : '')}
     </div>
     <div class="metar-raw">${F.esc(m.rawOb ?? '')}</div>`;
+}
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const WX_CHIP: Record<string, string> = { storm: 'red', freezing: 'blue', snow: 'blue', rain: 'blue', fog: '', haze: '', dust: 'amber', ash: 'amber' };
+
+/** A weather station: what it measured at its last report. */
+function renderStation(id: string) {
+  const r = weather.byId.get(id);
+  if (!r) return close();
+  const ap = AIRPORTS.find((a) => a[0] === id);
+  const t = r[WX.temp];
+  const words = wxWords(r[WX.wx]);
+  const kind = wxKind(r[WX.wx]);
+  const lat = r[WX.lat], lon = r[WX.lon];
+  open(`
+    ${head(`Weather station · ${ap ? F.esc(ap[4]) + ' ' + flagEmoji(ap[4]) : 'METAR'}`)}
+    <div class="p-title" style="padding-top:22px">
+      <h2 style="font-size:56px${t !== null ? `;color:${tempColor(t)}` : ''}">${t !== null ? `${Math.round(t)}°C` : '—'}</h2>
+      <div class="sub" id="wx-name">${F.esc(ap ? ap[2] : id)}</div>
+      <div class="sub2">${t !== null ? `${Math.round(t * 1.8 + 32)} °F · ` : ''}${F.esc(id)}${ap?.[1] ? ` · ${F.esc(ap[1])}` : ''} · observed ${F.ago(Date.now() / 1000 - r[WX.t])}</div>
+      ${words ? `<span class="chip ${WX_CHIP[kind ?? ''] ?? ''}">${F.esc(cap(words))}</span>` : ''}
+    </div>
+    <div id="metar"></div>
+    <div class="actions">
+      <button class="btn" data-act="fly" data-lon="${lon}" data-lat="${lat}" data-z="9">Zoom to station</button>
+      ${ap ? `<button class="btn" data-act="airport" data-id="${F.esc(id)}">Traffic at ${F.esc(ap[1] || id)}</button>` : ''}
+    </div>
+    <div class="prov">Measured at the station and reported as a METAR, the routine weather report airports and automatic stations send every 30 to 60 minutes and whenever the weather changes. Collected worldwide by NOAA's Aviation Weather Center. Nothing here is forecast.</div>
+  `);
+  loadMetar(id, 'Last report');
+}
+
+function renderHazard(h: (typeof hazards.items)[number]) {
+  const inside = [...picture.aircraft.values()].filter((a) => {
+    const r = a.row;
+    const alt = r[A.alt] ?? r[A.altGeom];
+    return !(r[A.flags] & AF.ground) && alt !== null && hazardsAt(a.x, a.y, alt).some((x) => x.id === h.id);
+  });
+  let lat = 0, lon = 0, n = 0;
+  for (const [x, y] of h.rings[0] ?? []) { lon += x; lat += y; n++; }
+  const until = (Date.now() < h.from ? `from ${F.utc(h.from)} ` : '') + `until ${F.utc(h.to)} UTC`;
+  open(`
+    ${head(`SIGMET · ${F.esc(h.area || 'aviation hazard')}`)}
+    <div class="p-title" style="padding-top:22px">
+      <h2 style="font-size:40px;line-height:1.05;color:${HAZARD_COLOR[h.kind]}">${F.esc(cap(h.label))}</h2>
+      <div class="sub">${F.esc(levels(h))}</div>
+      <div class="sub2">${F.esc(until)}</div>
+    </div>
+    <div class="grid">
+      ${cell('Aircraft inside now', F.n0(inside.length), 'within the area and its levels')}
+      ${cell('In force', F.ago((Date.now() - h.from) / 1000).replace(' ago', ''), `ends ${F.utc(h.to)} UTC`)}
+    </div>
+    ${inside.length ? `<div class="deck-h"><span>Flying through it</span><span>${inside.length}</span></div><div class="results near-list" style="margin:6px 14px 0">${inside.slice(0, 12).map((a) => `<div class="res" role="button" tabindex="0" data-act="pick-air" data-id="${a.id}"><span class="ic">${silhouetteSvg(a.cls, 18)}</span><span><div class="t">${F.esc(a.row[A.cs] || a.row[A.reg] || a.row[A.hex].toUpperCase())}</div><div class="s">${F.esc(a.row[A.type] || CLASS_LABEL[a.cls])}</div></span><span class="r">${F.altitude(a.row[A.alt])}</span></div>`).join('')}</div>` : ''}
+    <div class="metar-raw" style="white-space:pre-wrap">${F.esc(h.raw)}</div>
+    <div class="actions"><button class="btn" data-act="fly" data-lon="${n ? lon / n : 0}" data-lat="${n ? lat / n : 0}" data-z="4.5">Show the area</button></div>
+    <div class="prov">A SIGMET warns every aircraft of weather that is dangerous to all of them, issued by the meteorological watch office for the airspace and valid for a few hours. Collected worldwide by NOAA's Aviation Weather Center. Whether an aircraft is inside one is worked out here, from its reported position and altitude.</div>
+  `);
 }
 
 function renderIss() {
@@ -758,7 +906,7 @@ function renderIss() {
     const el = sunElevation(Date.now(), p.lat, p.lon);
     setCell('sun', el > -horizonDip ? 'Sunlit' : 'In Earth’s shadow', `sun ${el.toFixed(0)}° at the point below`);
     setCell('pos', F.latLon(p.lat, p.lon), '');
-    if (app.follow) getMap().setCenter([p.lon, p.lat]);
+    if (app.follow) getMap().setCenter([p.lon, p.lat], { auto: true });
   };
   upd();
   tick = window.setInterval(upd, 500);

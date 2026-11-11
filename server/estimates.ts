@@ -8,7 +8,7 @@
 import { A, AF, type AircraftRow } from '../shared/protocol.ts';
 import { bearing, distance } from '../shared/geo.ts';
 import { checkRoute, type Airport, type Route } from '../shared/route.ts';
-import { getJson, Status } from './feeds/http.ts';
+import { every, getJson, Status } from './feeds/http.ts';
 
 const AIRLINE_CS = /^[A-Z]{3}\d[0-9A-Z]{0,4}$/;
 const TTL_MS = 6 * 3_600_000;
@@ -18,11 +18,18 @@ export class Estimator {
   private routes = new Map<string, { r: Route | null; t: number }>();
   private queue: string[] = [];
   private queued = new Set<string>();
-  active = 0;
 
   constructor() {
     this.status.note = 'beyond receiver range, from verified routes';
-    setInterval(() => this.work(), 1200);
+    // One lookup at a time: a slow adsbdb must not stack calls up (an
+    // interval timer started a new one every 1.2 s whatever the last did).
+    every(() => 1.2, () => this.work());
+  }
+
+  /** How many aircraft are being carried as estimates now (the store knows; index.ts counts). */
+  set active(n: number) {
+    this.status.count = n;
+    this.status.note = `${n} aircraft carried beyond receiver range on verified routes`;
   }
 
   private eligible(row: AircraftRow): boolean {
@@ -55,7 +62,7 @@ export class Estimator {
         r: fr?.origin && fr?.destination ? { airline: fr.airline?.name ?? '', airlineCountry: '', callsignIata: '', from: ap(fr.origin), to: ap(fr.destination) } : null,
         t: Date.now(),
       });
-      this.status.success(this.active);
+      this.status.success(this.status.count, this.status.note);
     } catch (e: any) {
       // adsbdb answers 404 for callsigns it doesn't know.
       if (e?.status === 404) this.routes.set(cs, { r: null, t: Date.now() });
@@ -78,8 +85,6 @@ export class Estimator {
     const remaining = distance(lat, lon, r.to.lat, r.to.lon);
     if (remaining < 500_000) return null; // close enough to be heard again
     const eta = row[A.posT] + remaining / ((row[A.gs] ?? 0) * 0.514444);
-    this.active++;
-    this.status.success(this.active);
     return { lat: r.to.lat, lon: r.to.lon, eta };
   }
 }

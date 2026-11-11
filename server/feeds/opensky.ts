@@ -5,14 +5,48 @@
 
 import type { AircraftReport } from '../store.ts';
 import { SRC } from '../../shared/protocol.ts';
-import { getJson, HttpError, Status } from './http.ts';
+import { getJson, HttpError, Status, UA } from './http.ts';
 
 const M_TO_FT = 1 / 0.3048;
 const MS_TO_KT = 3600 / 1852;
 const MS_TO_FPM = 60 / 0.3048;
 
-// OpenSky's aircraft category index (extended=1) → ADS-B emitter category.
-const CATS = ['', '', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'B1', 'B2', 'B3', 'B4', 'B6', 'B7', 'C1', 'C2', 'C3', 'C4', 'C5'];
+// OpenSky's aircraft category index (extended=1) → ADS-B emitter category,
+// per its REST API docs: 0 no information, 1 no ADS-B category, 2–8 A1–A7,
+// 9–12 B1–B4, 13 reserved (B5), 14 UAV (B6), 15 space vehicle (B7), 16–20
+// surface vehicles and obstacles (C1–C5).
+export const CATS = ['', '', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'B1', 'B2', 'B3', 'B4', '', 'B6', 'B7', 'C1', 'C2', 'C3', 'C4', 'C5'];
+
+/** One /states/all answer → reports, leaving out what isn't traffic. */
+export function parseStates(states: any[][] | null | undefined, cadence: number): AircraftReport[] {
+  const out: AircraftReport[] = [];
+  for (const s of states ?? []) {
+    const [icao, cs, , tPos, , lon, lat, baro, onGround, vel, trk, vr, , geo, sq, , , cat] = s;
+    if (lat == null || lon == null || tPos == null) continue;
+    const c = typeof cat === 'number' ? (CATS[cat] ?? '') : '';
+    // Ground vehicles and obstacles (tugs, follow-me cars, tethered
+    // balloons), as readsb.ts drops them.
+    if (c.startsWith('C')) continue;
+    out.push({
+      hex: String(icao).toLowerCase(),
+      lat,
+      lon,
+      posT: tPos,
+      alt: onGround ? 0 : baro == null ? null : Math.round(baro * M_TO_FT),
+      altGeom: geo == null ? null : Math.round(geo * M_TO_FT),
+      ground: !!onGround,
+      gs: vel == null ? null : vel * MS_TO_KT,
+      trk: trk ?? null,
+      vr: vr == null ? null : Math.round(vr * MS_TO_FPM),
+      cs: (cs ?? '').trim(),
+      sq: sq ?? '',
+      cat: c,
+      src: SRC.opensky,
+      cadence,
+    });
+  }
+  return out;
+}
 
 export class OpenSky {
   status: Status;
@@ -38,7 +72,8 @@ export class OpenSky {
       'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
+        signal: AbortSignal.timeout(20_000),
         body: new URLSearchParams({ grant_type: 'client_credentials', client_id: this.id, client_secret: this.secret }),
       },
     );
@@ -58,29 +93,9 @@ export class OpenSky {
       );
       const left = res.headers.get('x-rate-limit-remaining');
       this.creditsLeft = left === null ? null : Number(left);
-      let n = 0;
-      for (const s of data.states ?? []) {
-        const [icao, cs, , tPos, , lon, lat, baro, onGround, vel, trk, vr, , geo, sq, , , cat] = s;
-        if (lat == null || lon == null || tPos == null) continue;
-        ingest({
-          hex: String(icao).toLowerCase(),
-          lat,
-          lon,
-          posT: tPos,
-          alt: onGround ? 0 : baro == null ? null : Math.round(baro * M_TO_FT),
-          altGeom: geo == null ? null : Math.round(geo * M_TO_FT),
-          ground: !!onGround,
-          gs: vel == null ? null : vel * MS_TO_KT,
-          trk: trk ?? null,
-          vr: vr == null ? null : Math.round(vr * MS_TO_FPM),
-          cs: (cs ?? '').trim(),
-          sq: sq ?? '',
-          cat: typeof cat === 'number' ? (CATS[cat] ?? '') : '',
-          src: SRC.opensky,
-          cadence: this.pollS,
-        });
-        n++;
-      }
+      const reports = parseStates(data.states, this.pollS);
+      for (const r of reports) ingest(r);
+      const n = reports.length;
       this.healthy = true;
       this.status.success(n, this.creditsLeft === null ? this.status.note : `${this.creditsLeft} credits left today`);
       return this.pollS;

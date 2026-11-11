@@ -18,7 +18,10 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 - **Disasters** (GDACS): cyclones, floods, volcanoes, droughts and wildfires with orange or red alerts.
 - **The ISS** with its ground track 45 minutes back and ahead.
 - **Day and night**: the terminator plus civil, nautical and astronomical twilight, in 3° bands.
-- **Weather radar** (RainViewer), **airports** (3,300 with scheduled service) and **callsign labels**.
+- **Weather now** (`C`): the weather measured at about 5,000 stations worldwide in the last three hours (every METAR, from NOAA's Aviation Weather Center). A dot coloured by air temperature, a ring where it is raining, snowing, storming or foggy, an arrow showing where the surface wind is blowing, and the numbers in words when you zoom in. Click a station for its last report, decoded: conditions, wind, visibility, cloud, temperature, humidity and pressure.
+- **Satellite clouds** (`V`): the newest infrared picture from the ring of geostationary satellites (EUMETSAT's mosaic of Meteosat, GOES and Himawari, every three hours, its time stated), redrawn so clear sky is transparent and cloud is shading, deeper where the tops are colder and higher.
+- **Aviation hazards** (`Z`): every SIGMET in force worldwide, the warnings meteorological offices issue for weather dangerous to all aircraft (thunderstorms, severe turbulence and icing, volcanic ash, tropical cyclones, mountain waves), with the levels they cover and how long they last. Each has a sheet listing the aircraft flying through it now; an aircraft's own sheet says when it is inside one at its altitude, and the Log lists every aircraft that is.
+- **Weather radar** (`R`, RainViewer) with its time, and a loop of the last two hours. **Airports** (3,300 with scheduled service) and **callsign labels**.
 
 **What the aircraft itself says.** Many airliners broadcast far more than position, and Watchman shows it: the altitude and heading set on the autopilot and whether it is climbing to it, the autopilot modes engaged (LNAV, VNAV, approach, TCAS), indicated and true airspeed and Mach, bank angle and turn rate, the altimeter setting, outside air temperature against the standard atmosphere, the wind it is flying through split into headwind and crosswind, and how accurate its position is.
 
@@ -28,7 +31,7 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 
 **Ships, in depth.** Registry particulars (year built, gross tonnage, deadweight, registry and home port, nearest town) and the last day of track from Open Waters, plus photos and class from Wikidata.
 
-**The details sheet.** Click anything. For an aircraft: a photo of the actual airframe with the photographer's credit, its type, operator and registration, the country of registration from its ICAO address, the route with a progress bar, distance flown and to go and an arrival estimate, altitude (pressure and GNSS), vertical rate, ground speed, track, squawk, how its position was obtained (ADS-B, MLAT or TIS-B), report age, and an altitude and speed profile of its flight so far. For a ship: type, flag, destination and ETA, size, draught, rate of turn, and a photo and particulars from Wikidata when it has an IMO entry. Airports show live arrivals, departures and whether it is day or night there; earthquakes show depth, felt reports, tsunami flag and PAGER alert.
+**The details sheet.** Click anything. For an aircraft: a photo of the actual airframe with the photographer's credit, its type, operator and registration, the country of registration from its ICAO address, the route with a progress bar, distance flown and to go and an arrival estimate, altitude (pressure and GNSS), vertical rate, ground speed, track, squawk, how its position was obtained (ADS-B, MLAT or TIS-B), report age, and an altitude and speed profile of its flight so far. For a ship: type, flag, destination and ETA, size, draught, rate of turn, and a photo and particulars from Wikidata when it has an IMO entry. Airports show live arrivals, departures and whether it is day or night there; earthquakes show depth, felt reports, tsunami flag and PAGER alert. Under a verified route, the destination's weather right now. When a track drops out of the feed the sheet says so and keeps counting the age of its last report.
 
 **The Index** (`I`). The picture right now, as posters: aircraft aloft by altitude band, the highest and fastest aircraft, emergency squawks, the strongest earthquake of the week, the past day's quakes on a world map, where the sun is rising and setting, the ISS, ships under way, the busiest approach, military traffic, disaster alerts. They hang on cloth in WebGL, ripple, and bend as you scroll or drag through them. Click one to fly there.
 
@@ -42,9 +45,15 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 
 **Log** (`K`). The unusual things in the sky right now: emergencies, spacecraft, the next launches, drones (ADS-B category UAV, or a drone type such as Reaper, Global Hawk or Triton) and military aircraft by type. First sightings of each are written to a log kept on this device. Tanks and other ground vehicles carry no public transponder, so no open source can show them.
 
-**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination; airports by code, name or city; earthquakes by place; spacecraft by name or NORAD number; launches; and news headlines.
+**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination, anywhere in the world (not only those on screen); airports by code, name or city; earthquakes by place; spacecraft by name or NORAD number; launches; and news headlines.
 
 **Alerts** appear when an aircraft squawks 7500, 7600 or 7700 (once a second report confirms it) or a magnitude 5.5+ earthquake strikes.
+
+**Watch** an aircraft or ship from its sheet: a note (and a system notification when the tab is in the background, if you allow it) when it comes into range, takes off, lands, squawks an emergency, gets under way or stops. The Log lists what you are watching. The list stays on your device.
+
+**Replay** (`P`, or Replay at the bottom): the last few hours from snapshots the server takes every minute, scrubbed with a slider or played at 30, 60 or 240 times real speed, positions blended between snapshots.
+
+**Links** carry what is on screen: the view, the selection and any layers you changed, for example `/#@51.4700,-0.4500,8.50/a:4ca7b4/layers:+weather`. Older links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) still work, a ship link opens a ship anywhere in the world, and a link to something no longer tracked says so.
 
 ## Accuracy
 
@@ -101,19 +110,23 @@ Everything is optional; copy `.env.example` to `.env`.
 
 | Setting | What it does |
 | --- | --- |
+| `OPENSKY` | Off unless `on`. OpenSky's terms ask for a written agreement before its API feeds any live service, even a free one; switch it on once you have one. |
+| `ADSBONE` | Off unless `on`. ADSB One's terms allow personal use only and forbid redisplaying its data, and its API was archived in 2026. |
+| `ADSBLOL_PER_DAY` | Requests a day to adsb.lol (default 450; it allows 500 per address without a key). |
+| `REPLAY_HOURS` | Hours of snapshots kept for replay (default 2, about 25 MB an hour at a busy time). |
 | `OPENSKY_CLIENT_ID`, `OPENSKY_CLIENT_SECRET` | A free OpenSky account raises the daily allowance from 400 to 4,000 credits. A worldwide poll costs 4, so anonymous access gives about four hours of world view a day at the default 150 s interval; an account keeps it live most of the day at 45 s. Polling only runs while someone is watching. |
 | `OPENSKY_POLL_S` | Seconds between worldwide polls. |
 | `AISSTREAM_API_KEY` | Worldwide ships from AISStream (free key at aisstream.io). Without it, ships come from Fintraffic's open feed for the Baltic. |
 | `PORT` | Port for the aggregator and the built site (default 8080). |
+| `TRUST_PROXY_HOPS` | How many proxies in front of the server add to X-Forwarded-For (default 1, as on Render). Per-address limits use the address the nearest one saw, and only when the connection comes from a private address; 0 ignores the header. |
 
 ### Free coverage, no keys
 
 Without any keys, Watchman combines:
 
-- **OpenSky** for a worldwide aircraft snapshot (anonymous allowance).
-- **A worldwide sweep** across four volunteer ADS-B networks (adsb.fi, adsb.lol, airplanes.live, adsb.one): 349 circles of 250 nm placed wherever there are scheduled airports, busiest airspace every two minutes, the rest every five, each network kept under its published rate limit. It fills what OpenSky misses and carries the whole picture when OpenSky's credits run out (the status line then says `Live · regional`).
+- **A worldwide sweep** across the volunteer ADS-B networks (adsb.fi, airplanes.live, and adsb.lol within its 500 requests a day): 608 circles of 250 nm, spaced so every scheduled airport and the airspace between them is inside one, busiest airspace every two minutes and the rest every five when the networks have room (longer when they don't), each network kept under its published rate limit. It carries the whole picture; OpenSky, when switched on, adds a worldwide snapshot on top (the status line says `Live · regional` when it is on but out of credits).
 - **Estimated positions beyond receiver range**, the way commercial trackers fill the oceans. When an airliner at cruise falls silent and its filed route is confirmed by its position and heading (within 30° of the destination), it is carried along the great circle to its destination at its last ground speed until about 20 minutes out, when receivers there should hear it again. Estimates are drawn as faded ghosts, labelled everywhere, kept out of every live count and headline, and replaced by the first real report.
-- **Worldwide by aircraft type.** adsb.lol, airplanes.live and adsb.one answer "every aircraft of this type, anywhere" in one request, so the server asks for the 60 most common types (ranked from live traffic) every few minutes. In testing that added about 15–20% more aircraft than the circle sweep alone.
+- **Worldwide by aircraft type.** airplanes.live (and adsb.lol, adsb.one) answer "every aircraft of this type, anywhere" in one request, so the server asks for the 60 most common types (ranked from live traffic) every few minutes. In testing that added about 15–20% more aircraft than the circle sweep alone.
 - **Military aircraft** from every network's military list each cycle (each hears different traffic), worldwide queries for military types (tankers, transports, patrol, AWACS, helicopters), and flagged by the airframe database, by types only air forces fly, and by the ICAO address blocks states reserve for military use. Military aircraft that answer radar with Mode S but broadcast no position are shown too, as rings at the rough area of the receivers hearing them, clearly marked approximate (they can be off by a hundred kilometres or more), with fast jets and bombers (F-16, F-15, F/A-18, F-35, F-22, B-1, B-2, B-52, Eurofighter, Rafale, Gripen, Hawk, M-346) searched for by type worldwide. Press `M` to show only military. Only aircraft that transmit something can be shown; most combat sorties don't.
 - **Your view**, refreshed every five seconds from the same networks, plus worldwide military aircraft and emergency squawks.
 - **Ships worldwide** from Open Waters AIS, an open network that merges government feeds, AISHub, aisstream.io and volunteer receivers and needs no key: the server sweeps the world's seas in 10° boxes (busy ones every 3 minutes, empty ones hourly) within its anonymous limits, and polls whatever you are looking at every 20 seconds. Plus Fintraffic (Baltic) and Kystverket (Norway) directly. Around 40,000 ships within two minutes of starting; the browser receives only those in view (up to 12,000). An optional free token (`OPENWATERS_TOKEN`) raises the limits.
@@ -128,7 +141,7 @@ adsb.fi / adsb.lol (your view │
   every 5 s, military,        ├─► server/store.ts ─► /api/air  (deltas) ─┐
   emergency squawks) ─────────┤    merge by address,  /api/sea           ├─► browser: dead reckoning,
 Fintraffic AIS, AISStream ────┤    newest position    /api/world         │   MapLibre globe, panels,
-USGS, GDACS, ISS ─────────────┘    wins, history      /api/history/...  ─┘   three.js Index
+USGS, GDACS, ISS, METARs ─────┘    wins, history      /api/history/...  ─┘   three.js Index
 tar1090 aircraft database ────────► types, registrations
 ```
 
@@ -147,13 +160,18 @@ Photos (Planespotters), airframes and routes (adsbdb), ship particulars (Wikidat
 | `L` | Layers and filters |
 | `M` | Military aircraft only |
 | `W` | Winds aloft |
+| `C` | Weather now, measured at stations |
+| `V` | Satellite clouds |
+| `Z` | Aviation hazards (SIGMETs) |
+| `P` | Replay |
 | `F` | Follow the selected track |
 | `G` | Back to the whole globe |
 | `R` / `N` / `A` / `E` / `T` | Radar / day and night / airports / earthquakes / trail |
 | `Esc` | Close, or clear the selection |
 
-Links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) open with that track selected.
 
 ## Data and credits
 
-Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.
+Each source's terms were checked in November 2026. Most volunteer and open feeds are for non-commercial use: Watchman is free, with no ads or accounts, and anyone running a public copy should read the terms of the sources they switch on. In short: adsb.fi asks for a credit and link and one request a second; adsb.lol data is ODbL 1.0; RainViewer's free API is for personal, educational and small community use, with a credit and link; EUMETSAT imagery is CC BY 4.0 and wants "Contains modified EUMETSAT data"; NOAA's data is public domain (no endorsement implied); Planespotters photos must show the photographer and link to the photo page, loaded by the browser, never proxied; adsbdb's route data may not be republished, so routes are looked up by the browser and not stored; Open Waters is free for personal use, and the sources it relays keep their own attribution. airplanes.live's terms page could not be read from a server; it describes its API as non-commercial, one request a second.
+
+Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network (when switched on); adsb.fi (adsb.fi); © adsb.lol contributors, ODbL 1.0; airplanes.live; adsb.one (when switched on); Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); NOAA Aviation Weather Center (METARs and SIGMETs); contains modified EUMETSAT data (geostationary infrared, CC BY 4.0), with NOAA GOES and JMA Himawari imagery; wheretheiss.at; weather data by RainViewer (rainviewer.com); The Space Devs (Launch Library 2); CelesTrak; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.

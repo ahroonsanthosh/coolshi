@@ -15,6 +15,15 @@ export class HttpError extends Error {
   }
 }
 
+/** Retry-After is seconds or an HTTP date; seconds from now, or null. */
+export function retryAfter(v: string | null, now = Date.now()): number | null {
+  if (!v) return null;
+  const n = Number(v);
+  if (Number.isFinite(n)) return Math.max(0, n);
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.max(0, (t - now) / 1000) : null;
+}
+
 export async function getJson<T = any>(url: string, init: RequestInit = {}, timeoutMs = 20_000): Promise<{ data: T; res: Response }> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -25,8 +34,10 @@ export async function getJson<T = any>(url: string, init: RequestInit = {}, time
       headers: { 'User-Agent': UA, Accept: 'application/json', 'Accept-Encoding': 'gzip', ...(init.headers ?? {}) },
     });
     if (!res.ok) {
-      const ra = res.headers.get('retry-after') ?? res.headers.get('x-rate-limit-retry-after-seconds');
-      throw new HttpError(res.status, ra ? Number(ra) : null, `${res.status} ${res.statusText}`.trim());
+      // adsb.lol says when its daily allowance resets (seconds from now).
+      const ra = res.headers.get('retry-after') ?? res.headers.get('x-rate-limit-retry-after-seconds')
+        ?? (res.status === 429 ? res.headers.get('x-ratelimit-reset') : null);
+      throw new HttpError(res.status, retryAfter(ra), `${res.status} ${res.statusText}`.trim());
     }
     return { data: (await res.json()) as T, res };
   } finally {
