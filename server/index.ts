@@ -18,10 +18,11 @@ import { sweepGrid } from './grid.ts';
 import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
+import { Clouds, Metars } from './feeds/weather.ts';
 import { Gazetteer, News } from './feeds/news.ts';
 import { Launches, Spacecraft } from './feeds/space.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
-import { AF, SRC, type NewsPayload, type SpacePayload, type WorldPayload } from '../shared/protocol.ts';
+import { AF, SRC, type NewsPayload, type SpacePayload, type WeatherPayload, type WorldPayload } from '../shared/protocol.ts';
 import { destination, distance, NM } from '../shared/geo.ts';
 
 const gz = promisify(gzip);
@@ -51,6 +52,8 @@ const airportPts = (JSON.parse(readFileSync(join(ROOT, 'src/data/airports.json')
 const openwaters = new OpenWaters(airportPts);
 const usgs = new Usgs();
 const gdacs = new Gdacs();
+const metars = new Metars();
+const clouds = new Clouds();
 const iss = new Iss();
 const spacecraft = new Spacecraft();
 const launches = new Launches();
@@ -253,6 +256,10 @@ aisstream.start((r) => sea.ingest(r));
 every(() => 120, () => usgs.poll());
 every(() => 900, () => gdacs.poll());
 every(() => 300, () => iss.poll());
+// Weather only while someone is watching (and once at start): the station
+// file every five minutes, the newest satellite image time every fifteen.
+every(() => 300, async () => { if (!watching() && metars.stations.length) return 30; await metars.poll(); });
+every(() => 900, async () => { if (!watching() && clouds.time) return 30; await clouds.poll(); });
 // Headlines keep coming whether or not anyone is watching, so the desk is
 // full when someone arrives; each feed is asked every 10 to 20 minutes.
 every(() => 2, () => news.tick());
@@ -272,19 +279,36 @@ const MIME: Record<string, string> = {
   '.webmanifest': 'application/manifest+json',
 };
 
-async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, body: unknown) {
-  const raw = Buffer.from(JSON.stringify(body));
+// Payloads that are the same object for every viewer until their data
+// changes are serialised and compressed once, not once per request.
+const packed = new WeakMap<object, { raw: Buffer; z?: Buffer }>();
+
+async function sendJson(req: http.IncomingMessage, res: http.ServerResponse, body: unknown, shared = false) {
+  let pk = shared && body && typeof body === 'object' ? packed.get(body) : undefined;
+  if (!pk) {
+    pk = { raw: Buffer.from(JSON.stringify(body)) };
+    if (shared && body && typeof body === 'object') packed.set(body, pk);
+  }
+  const raw = pk.raw;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*',
   };
   if (raw.length > 1024 && /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
-    const z = await gz(raw, { level: 6 });
+    const z = pk.z ?? (pk.z = await gz(raw, { level: 6 }));
     res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': z.length });
     res.end(z);
   } else {
     res.writeHead(200, { ...headers, 'Content-Length': raw.length });
     res.end(raw);
   }
+}
+
+let wxBody: WeatherPayload | null = null;
+function weatherBody(): WeatherPayload {
+  if (!wxBody || wxBody.stations !== metars.stations || wxBody.clouds !== clouds.time) {
+    wxBody = { at: metars.status.lastOk, stations: metars.stations, clouds: clouds.time };
+  }
+  return wxBody;
 }
 
 let windCache = { t: 0, v: [] as ReturnType<typeof air.winds> };
@@ -321,7 +345,7 @@ function sources() {
   for (const r of air.values()) if (r[14] & AF.est) est++;
   estimator.status.count = est;
   estimator.status.note = `${est} aircraft carried beyond receiver range on verified routes`;
-  return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, iss.status, spacecraft.status, launches.status, news.status]
+  return [...ownAir.map((f) => f.status), opensky.status, laneStatus.adsbfi, laneStatus.adsblol, laneStatus.airplaneslive, laneStatus.adsbone, estimator.status, openwaters.status, digitraffic.status, kystverket.status, ...ownAis.map((f) => f.status), aisstream.status, usgs.status, gdacs.status, metars.status, clouds.status, iss.status, spacecraft.status, launches.status, news.status]
     .map((s) => s.toJSON());
 }
 
@@ -356,6 +380,7 @@ const server = http.createServer(async (req, res) => {
     m = p.match(/^\/api\/detail\/sea\/(\d{6,9})$/);
     if (m) return sendJson(req, res, await shipDetail(Number(m[1])));
     if (p === '/api/winds') return sendJson(req, res, windsCached());
+    if (p === '/api/weather') return sendJson(req, res, weatherBody(), true);
     if (p === '/api/space') {
       const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };
       return sendJson(req, res, body);

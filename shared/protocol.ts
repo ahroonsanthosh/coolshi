@@ -94,3 +94,22 @@ export interface Launch {
   lat: number; lon: number; image: string; crewed: boolean; webcast: boolean;
 }
 export interface SpacePayload { now: number; sats: SatTle[]; launches: Launch[] }
+
+/**
+ * Weather observed at a station (METAR), compact for the wire.
+ * [station, lat, lon, observed (unix s), temp °C, dew point °C,
+ *  wind from ° true (-1 variable), wind kt, gust kt, visibility statute mi,
+ *  present weather (METAR codes, e.g. "-RA BR")]
+ */
+export type WxRow = [
+  string, number, number, number, number | null, number | null,
+  number | null, number | null, number | null, number | null, string,
+];
+export const WX = { id: 0, lat: 1, lon: 2, t: 3, temp: 4, dew: 5, wdir: 6, wspd: 7, gust: 8, vis: 9, wx: 10 } as const;
+export interface WeatherPayload {
+  /** When the server last fetched the station file, ms. */
+  at: number;
+  stations: WxRow[];
+  /** The newest global infrared cloud image (ms), or null if unknown. */
+  clouds: number | null;
+}

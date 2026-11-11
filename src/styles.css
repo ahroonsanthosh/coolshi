@@ -129,6 +129,7 @@ body.panel-open .caption.swap { transform: translateX(calc(-50% - 200px)) transl
   transition: opacity 0.3s;
 }
 .legend .ramp { height: 4px; border-radius: 2px; }
+.legend .lg2 { margin-top: 6px; }
 .legend .ticks { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
 body.panel-open .legend { opacity: 0; pointer-events: none; }
 

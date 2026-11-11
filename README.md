@@ -18,6 +18,8 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 - **Disasters** (GDACS): cyclones, floods, volcanoes, droughts and wildfires with orange or red alerts.
 - **The ISS** with its ground track 45 minutes back and ahead.
 - **Day and night**: the terminator plus civil, nautical and astronomical twilight, in 3° bands.
+- **Weather now** (`C`): the weather measured at about 5,000 stations worldwide in the last three hours (every METAR, from NOAA's Aviation Weather Center). A dot coloured by air temperature, a ring where it is raining, snowing, storming or foggy, an arrow showing where the surface wind is blowing, and the numbers in words when you zoom in. Click a station for its last report, decoded: conditions, wind, visibility, cloud, temperature, humidity and pressure.
+- **Satellite clouds** (`V`): the newest infrared picture from the ring of geostationary satellites (EUMETSAT's mosaic of Meteosat, GOES and Himawari, every three hours, its time stated), redrawn so clear sky is transparent and cloud is shading, deeper where the tops are colder and higher.
 - **Weather radar** (RainViewer), **airports** (3,300 with scheduled service) and **callsign labels**.
 
 **What the aircraft itself says.** Many airliners broadcast far more than position, and Watchman shows it: the altitude and heading set on the autopilot and whether it is climbing to it, the autopilot modes engaged (LNAV, VNAV, approach, TCAS), indicated and true airspeed and Mach, bank angle and turn rate, the altimeter setting, outside air temperature against the standard atmosphere, the wind it is flying through split into headwind and crosswind, and how accurate its position is.
@@ -128,7 +130,7 @@ adsb.fi / adsb.lol (your view │
   every 5 s, military,        ├─► server/store.ts ─► /api/air  (deltas) ─┐
   emergency squawks) ─────────┤    merge by address,  /api/sea           ├─► browser: dead reckoning,
 Fintraffic AIS, AISStream ────┤    newest position    /api/world         │   MapLibre globe, panels,
-USGS, GDACS, ISS ─────────────┘    wins, history      /api/history/...  ─┘   three.js Index
+USGS, GDACS, ISS, METARs ─────┘    wins, history      /api/history/...  ─┘   three.js Index
 tar1090 aircraft database ────────► types, registrations
 ```
 
@@ -147,6 +149,8 @@ Photos (Planespotters), airframes and routes (adsbdb), ship particulars (Wikidat
 | `L` | Layers and filters |
 | `M` | Military aircraft only |
 | `W` | Winds aloft |
+| `C` | Weather now, measured at stations |
+| `V` | Satellite clouds |
 | `F` | Follow the selected track |
 | `G` | Back to the whole globe |
 | `R` / `N` / `A` / `E` / `T` | Radar / day and night / airports / earthquakes / trail |
@@ -156,4 +160,4 @@ Links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) open with that trac
 
 ## Data and credits
 
-Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.
+Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); NOAA Aviation Weather Center (METAR); EUMETSAT (geostationary infrared); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.

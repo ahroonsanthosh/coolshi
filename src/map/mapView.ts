@@ -7,13 +7,15 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 // its own module, which a bundler moves.
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 maplibregl.setWorkerUrl(workerUrl);
-import { A, AF, S, type HistoryPoint } from '../../shared/protocol.ts';
+import { A, AF, S, WX, type HistoryPoint } from '../../shared/protocol.ts';
 import { bearing, destination, greatCircle, NM, distance } from '../../shared/geo.ts';
 import { nightPolygon } from '../../shared/sun.ts';
 import { paperStyle, PAPER, LABEL_FONT, LABEL_FONT_BOLD } from './style.ts';
 import { addIcons } from './icons.ts';
 import { loadWinds, onWinds, winds } from '../state/winds.ts';
-import { altColorExpr, altColor, EMERGENCY, INK, QUAKE, SHIP, SHIP_STILL } from './colors.ts';
+import { loadWeather, onWeather, weather } from '../state/weather.ts';
+import { wxKind, wxWords } from '../lib/weather.ts';
+import { altColorExpr, altColor, EMERGENCY, GROUND, INK, QUAKE, SHIP, SHIP_STILL, tempColorExpr } from './colors.ts';
 import { picture, type Aircraft, type Ship } from '../state/data.ts';
 import { app, type Selection } from '../state/app.ts';
 import { news } from '../state/news.ts';
@@ -117,6 +119,63 @@ function setup() {
 
   // Weather radar sits under traffic.
   map.addSource('radar', { type: 'raster', tiles: [], tileSize: 256, maxzoom: 7 } as any);
+
+  // Weather observed at stations (METAR): a dot coloured by the measured air
+  // temperature, a ring where it is raining, snowing, storming or foggy right
+  // now, an arrow showing where the surface wind is blowing, and the numbers
+  // when zoomed in. Radar is inserted beneath these, satellite cloud lower still.
+  addSource('wx');
+  map.addLayer({
+    id: 'wx-ring', type: 'circle', source: 'wx',
+    // On the globe only what is falling or blowing; mist and haze up close.
+    filter: ['all', ['!=', ['get', 'k'], ''],
+      ['any', ['>=', ['zoom'], 4], ['in', ['get', 'k'], ['literal', ['storm', 'freezing', 'snow', 'rain', 'ash']]]]],
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 3.2, 5, 6.5, 9, 10],
+      'circle-color': 'rgba(0,0,0,0)',
+      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 1, 1, 6, 1.8],
+      'circle-stroke-color': ['match', ['get', 'k'],
+        'storm', '#a01f73', 'freezing', '#6a3fc0', 'snow', '#4f7fcf', 'rain', '#2a64a8',
+        'fog', '#8a8379', 'haze', '#b3a99c', 'dust', '#b07a3c', 'ash', '#55504a', '#8a8379'],
+      'circle-stroke-opacity': ['match', ['get', 'k'], ['haze', 'fog', 'dust'], 0.7, 0.95],
+      'circle-pitch-alignment': 'map',
+    },
+  });
+  map.addLayer({
+    id: 'wx-wind', type: 'symbol', source: 'wx', minzoom: 4,
+    filter: ['>=', ['get', 'ws'], 3],
+    layout: {
+      visibility: 'none',
+      'icon-image': 'arrow',
+      'icon-size': ['interpolate', ['linear'], ['get', 'ws'], 3, 0.2, 15, 0.3, 30, 0.42, 50, 0.56],
+      'icon-rotate': ['get', 'rot'],
+      'icon-rotation-alignment': 'map',
+      'symbol-sort-key': ['-', 0, ['get', 'ws']],
+    },
+    paint: { 'icon-color': '#6d665e', 'icon-halo-color': PAPER.bg, 'icon-halo-width': 0.8 },
+  });
+  map.addLayer({
+    id: 'wx-dots', type: 'circle', source: 'wx',
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 1.5, 5, 3, 9, 5],
+      'circle-color': ['case', ['==', ['get', 't'], null], GROUND, tempColorExpr()],
+      'circle-stroke-color': PAPER.bg,
+      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 2, 0, 5, 0.8],
+      'circle-pitch-alignment': 'map',
+    },
+  });
+  map.addLayer({
+    id: 'wx-labels', type: 'symbol', source: 'wx', minzoom: 5,
+    layout: {
+      visibility: 'none',
+      'text-field': ['get', 'label'],
+      'text-font': LABEL_FONT, 'text-size': 10, 'text-offset': [0, 0.8], 'text-anchor': 'top',
+      'text-optional': true, 'text-max-width': 10, 'text-line-height': 1.15,
+    },
+    paint: { 'text-color': '#5c564f', 'text-halo-color': PAPER.bg, 'text-halo-width': 1.4 },
+  });
 
   // Earthquakes and disasters.
   addSource('quakes');
@@ -434,6 +493,10 @@ function setup() {
   pollWinds();
   loadRadar();
   setInterval(loadRadar, 5 * 60_000);
+  onWeather(() => { drawWeather(); updateClouds(); });
+  app.on('layers', () => pollWeather());
+  setInterval(pollWeather, 60_000);
+  pollWeather();
   picture.on((w) => { if (w === 'world') updateWorld(); if (w === 'sea') needsShips = true; });
   requestAnimationFrame(frame);
 }
@@ -469,6 +532,8 @@ const LAYER_GROUPS: Record<string, string[]> = {
   night: NIGHT_BANDS.map((d) => `night${d}`),
   trails: ['trail'],
   winds: ['winds'],
+  weather: ['wx-ring', 'wx-wind', 'wx-dots', 'wx-labels'],
+  clouds: ['clouds'],
 };
 
 function applyLayerVisibility() {
@@ -511,6 +576,85 @@ function updateNight() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Weather observed now: stations and satellite clouds
+
+let wxLoaded = 0;
+function pollWeather() {
+  if (!app.layers.weather && !app.layers.clouds) return;
+  if (Date.now() - wxLoaded < 240_000) return;
+  wxLoaded = Date.now();
+  loadWeather();
+}
+
+function drawWeather() {
+  if (!sources.wx) return;
+  sources.wx.setData(fc(weather.stations.map((r) => {
+    const t = r[WX.temp], wd = r[WX.wdir], words = wxWords(r[WX.wx]).split(', ')[0];
+    return {
+      type: 'Feature', geometry: { type: 'Point', coordinates: [r[WX.lon], r[WX.lat]] },
+      properties: {
+        id: r[WX.id], t, k: wxKind(r[WX.wx]) ?? '',
+        ws: wd !== null && wd >= 0 ? r[WX.wspd] ?? 0 : 0, rot: wd !== null && wd >= 0 ? (wd + 180) % 360 : 0,
+        label: `${t !== null ? `${Math.round(t)}°` : ''}${words ? `\n${words}` : ''}`,
+      },
+    };
+  })));
+}
+
+// Infrared shows cloud tops bright in proportion to how cold (and so how high)
+// they are, and warm ground dark. Each tile is redrawn so clear sky is
+// transparent and cloud is grey shading on the paper, deeper for colder tops.
+// Cold ground (polar winter, high plateaus) reads as thin cloud: that is
+// what infrared sees.
+const CLOUD_LO = 105, CLOUD_HI = 205, CLOUD_MAX_ALPHA = 0.62, CLOUD_INK = [104, 110, 120];
+maplibregl.addProtocol('clouds', async (params, ctl) => {
+  const res = await fetch(params.url.replace(/^clouds:/, 'https:'), { signal: ctl.signal });
+  if (!res.ok) throw new Error(`clouds ${res.status}`);
+  const bmp = await createImageBitmap(await res.blob());
+  const c = typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(bmp.width, bmp.height)
+    : Object.assign(document.createElement('canvas'), { width: bmp.width, height: bmp.height });
+  const g = c.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  g.drawImage(bmp, 0, 0);
+  const img = g.getImageData(0, 0, bmp.width, bmp.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const t = Math.min(1, Math.max(0, (d[i] - CLOUD_LO) / (CLOUD_HI - CLOUD_LO)));
+    const a = d[i + 3] === 0 ? 0 : t * t * (3 - 2 * t) * CLOUD_MAX_ALPHA;
+    d[i] = CLOUD_INK[0]; d[i + 1] = CLOUD_INK[1]; d[i + 2] = CLOUD_INK[2]; d[i + 3] = Math.round(a * 255);
+  }
+  g.putImageData(img, 0, 0);
+  return { data: await createImageBitmap(c) };
+});
+
+/** The global infrared cloud mosaic, one WMS image tiled, at a fixed time. */
+let cloudsShown: number | null = null;
+export function cloudsTime() { return cloudsShown; }
+function updateClouds() {
+  const t = weather.clouds;
+  if (!t || t === cloudsShown) return;
+  cloudsShown = t;
+  const time = new Date(t).toISOString().replace('.000Z', 'Z');
+  const url = 'clouds://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap'
+    + '&layers=mumi:worldcloudmap_ir108&styles=&crs=EPSG:3857&bbox={bbox-epsg-3857}&width=256&height=256'
+    + `&format=image/png&transparent=true&time=${time}`;
+  const src = map.getSource('clouds') as maplibregl.RasterTileSource | undefined;
+  if (src) { src.setTiles([url]); return; }
+  map.addSource('clouds', {
+    type: 'raster', tiles: [url], tileSize: 256, maxzoom: 6,
+    attribution: '© <a href="https://view.eumetsat.int" target="_blank">EUMETSAT</a>',
+  });
+  map.addLayer({
+    id: 'clouds', type: 'raster', source: 'clouds',
+    layout: { visibility: app.layers.clouds ? 'visible' : 'none' },
+    paint: {
+      'raster-opacity': ['interpolate', ['linear'], ['zoom'], 3, 1, 7, 0.75],
+      'raster-resampling': 'linear', 'raster-fade-duration': 0,
+    },
+  }, 'airports');
+}
+
 export let radarTime = 0;
 async function loadRadar() {
   try {
@@ -528,7 +672,7 @@ async function loadRadar() {
       id: 'radar', type: 'raster', source: 'radar',
       layout: { visibility: app.layers.radar ? 'visible' : 'none' },
       paint: { 'raster-opacity': 0.55, 'raster-saturation': -0.35, 'raster-resampling': 'linear' },
-    }, 'quake-fill');
+    }, 'wx-ring');
   } catch { /* radar is optional */ }
 }
 
@@ -982,7 +1126,7 @@ function updateIss() {
 // ---------------------------------------------------------------------------
 // Pointer
 
-const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'news', 'airports', 'iss', 'sats', 'launches'];
+const PICKABLE = ['aircraft', 'approx', 'ships', 'ship-dots', 'quakes', 'disasters', 'news', 'airports', 'iss', 'sats', 'launches', 'wx-dots', 'wx-ring'];
 
 function toSelection(f: MapGeoJSONFeature): Selection | null {
   const id = f.properties?.id as string;
@@ -996,6 +1140,7 @@ function toSelection(f: MapGeoJSONFeature): Selection | null {
     case 'launches': return { kind: 'launch', id };
     case 'airports': return { kind: 'airport', id };
     case 'iss': return { kind: 'iss', id: 'iss' };
+    case 'wx-dots': case 'wx-ring': return { kind: 'wx', id };
   }
   return null;
 }
@@ -1006,7 +1151,7 @@ function pick(point: maplibregl.Point): Selection | null {
   const feats = map.queryRenderedFeatures(box, { layers });
   if (!feats.length) return null;
   // Nearest wins, with tracks preferred over the background events.
-  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' || l === 'sats' ? 0 : l === 'airports' ? 2 : 1);
+  const rank = (l: string) => (l === 'aircraft' || l === 'approx' || l === 'ships' || l === 'ship-dots' || l === 'iss' || l === 'sats' ? 0 : l === 'airports' ? 2 : l.startsWith('wx-') ? 3 : 1);
   feats.sort((a, b) => rank(a.layer.id) - rank(b.layer.id));
   return toSelection(feats[0]);
 }

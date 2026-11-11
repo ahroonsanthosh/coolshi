@@ -8,7 +8,10 @@ import * as F from '../lib/format.ts';
 import { CLASS_LABEL, SQUAWK_MEANING, tidyDesc } from '../lib/aircraft.ts';
 import { shipType, NAV_STATUS } from '../lib/ais.ts';
 import { silhouetteSvg } from '../map/icons.ts';
-import { altGradientCss } from '../map/colors.ts';
+import { altGradientCss, tempGradientCss } from '../map/colors.ts';
+import { weather } from '../state/weather.ts';
+import { wxWords } from '../lib/weather.ts';
+import { WX } from '../../shared/protocol.ts';
 import { AIRPORTS, counts, flyTo, issNow, acHidden, getMap } from '../map/mapView.ts';
 import { news } from '../state/news.ts';
 import { space, countdown, SAT_KIND_LABEL } from '../state/space.ts';
@@ -126,6 +129,16 @@ export function describe(kind: string, id: string): [string, string] | null {
     if (!l) return null;
     return [l.name, `${l.location} · ${countdown(l.net)} · ${l.statusName || l.status}`];
   }
+  if (kind === 'wx') {
+    const r = weather.byId.get(id);
+    if (!r) return null;
+    const ap = AIRPORTS.find((x) => x[0] === id);
+    const t = r[WX.temp], wd = r[WX.wdir], ws = r[WX.wspd];
+    const wind = ws === null ? '' : ws === 0 ? 'calm' : `wind ${wd === -1 || wd === null ? 'variable' : F.heading(wd)} ${ws} kt${r[WX.gust] ? ` gusting ${r[WX.gust]}` : ''}`;
+    const words = wxWords(r[WX.wx]);
+    return [`${t !== null ? `${Math.round(t)}°C · ` : ''}${ap ? ap[1] || id : id}`,
+      [words && words.charAt(0).toUpperCase() + words.slice(1), wind, `observed ${F.ago(Date.now() / 1000 - r[WX.t])}`].filter(Boolean).join(' · ')];
+  }
   if (kind === 'iss') {
     const p = issNow();
     return ['International Space Station', p ? `${F.n0(p.alt)} km up · ${F.n0(p.vel)} km/h` : 'in orbit'];
@@ -153,8 +166,14 @@ export function initStatus() {
   draw();
   setInterval(draw, 2000);
   const lg = $('legend');
-  lg.innerHTML = `<div>Altitude</div><div class="ramp" style="background:${altGradientCss()}"></div>
-    <div class="ticks"><span>0</span><span>10k</span><span>20k</span><span>30k</span><span>45k ft</span></div>`;
+  const drawLegend = () => {
+    lg.innerHTML = `<div>Altitude</div><div class="ramp" style="background:${altGradientCss()}"></div>
+    <div class="ticks"><span>0</span><span>10k</span><span>20k</span><span>30k</span><span>45k ft</span></div>${app.layers.weather ? `
+    <div class="lg2">Air temperature</div><div class="ramp" style="background:${tempGradientCss()}"></div>
+    <div class="ticks"><span>−40</span><span>−20</span><span>0</span><span>20</span><span>40 °C</span></div>` : ''}`;
+  };
+  drawLegend();
+  app.on('layers', drawLegend);
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +191,8 @@ const LAYER_INFO: [LayerKey, string, string, string][] = [
   ['iss', 'Space station', 'The ISS and its ground track', ''],
   ['space', 'Spacecraft and launches', 'Stations, crew and cargo ships, bright satellites (CelesTrak orbits) and upcoming launches', 'S'],
   ['winds', 'Winds aloft', 'Wind measured by aircraft in flight, last 10 min; arrows point downwind', 'W'],
+  ['weather', 'Weather now', 'Measured at about 5,000 stations worldwide (METAR): temperature, wind, and a ring where it is raining, snowing, storming or foggy', 'C'],
+  ['clouds', 'Satellite clouds', 'Infrared picture from the geostationary satellites (EUMETSAT), every 3 hours', 'V'],
   ['radar', 'Weather radar', 'Latest rain and snow, RainViewer', 'R'],
   ['night', 'Day and night', 'Terminator with civil, nautical and astronomical twilight', 'N'],
 ];
@@ -202,14 +223,19 @@ function drawLayers() {
   const lc: Partial<Record<LayerKey, number>> = {
     aircraft: picture.aircraft.size, ships: picture.world?.ships?.total ?? picture.ships.size, quakes: picture.world?.quakes.length,
     disasters: picture.world?.disasters.length, airports: AIRPORTS.length, news: news.items.filter((i) => i.place).length, space: space.sats.length + space.launches.length,
+    ...(weather.stations.length ? { weather: weather.stations.length } : {}),
+  };
+  // Say how old the weather is, since it is only as new as its last report.
+  const desc: Partial<Record<LayerKey, string>> = {
+    ...(weather.clouds ? { clouds: `Infrared picture from the geostationary satellites (EUMETSAT), every 3 hours; this one ${new Date(weather.clouds).toISOString().slice(11, 16)} UTC, ${F.ago((Date.now() - weather.clouds) / 1000)}` } : {}),
   };
   el.innerHTML = `
     <h3>Layers</h3>
-    ${LAYER_INFO.map(([k, name, desc, key]) => `
+    ${LAYER_INFO.map(([k, name, info, key]) => `
       <div class="tog" role="switch" tabindex="0" aria-checked="${app.layers[k]}" data-layer="${k}">
         <span class="name">${name}${lc[k] !== undefined ? `<span class="count">${F.n0(lc[k]!)}</span>` : ''}${key ? `<kbd>${key}</kbd>` : ''}</span>
         <span class="sw"></span>
-        <span class="desc">${desc}</span>
+        <span class="desc">${desc[k] ?? info}</span>
       </div>`).join('')}
     <h3>Show aircraft</h3>
     <div class="tog" role="switch" tabindex="0" aria-checked="${app.milOnly}" data-milonly="1">
@@ -435,6 +461,8 @@ export function openAbout() {
             <kbd>G</kbd><span>Back to the whole globe</span>
             <kbd>M</kbd><span>Military aircraft only</span>
             <kbd>W</kbd><span>Winds aloft, measured by aircraft</span>
+            <kbd>C</kbd><span>Weather now, measured at stations</span>
+            <kbd>V</kbd><span>Satellite clouds</span>
             <kbd>R</kbd><span>Weather radar</span>
             <kbd>N</kbd><span>Day and night</span>
             <kbd>Esc</kbd><span>Close, or clear the selection</span>
@@ -541,6 +569,8 @@ export function initKeys(handlers: { index: () => void; home: () => void }) {
     else if (k === 'f' || k === 'F') { if (app.selection) app.setFollow(!app.follow); }
     else if (k === 'g' || k === 'G') handlers.home();
     else if (k === 'r' || k === 'R') app.setLayer('radar', !app.layers.radar);
+    else if (k === 'c' || k === 'C') app.setLayer('weather', !app.layers.weather);
+    else if (k === 'v' || k === 'V') app.setLayer('clouds', !app.layers.clouds);
     else if (k === 'w' || k === 'W') app.setLayer('winds', !app.layers.winds);
     else if (k === 'm' || k === 'M') app.setMilOnly(!app.milOnly);
     else if (k === 'n' || k === 'N') app.setLayer('night', !app.layers.night);

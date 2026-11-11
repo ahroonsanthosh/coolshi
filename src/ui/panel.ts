@@ -1,7 +1,7 @@
 // The details sheet. Every number on it says where it came from and how old
 // it is; anything we can't verify is left out rather than guessed.
 
-import { A, AF, S, SRC_NAMES, type HistoryPoint, type Quake, type Disaster, type NewsItem } from '../../shared/protocol.ts';
+import { A, AF, S, SRC_NAMES, WX, type HistoryPoint, type Quake, type Disaster, type NewsItem } from '../../shared/protocol.ts';
 import { distance } from '../../shared/geo.ts';
 import { news } from '../state/news.ts';
 import { space, countdown, SAT_KIND_LABEL } from '../state/space.ts';
@@ -13,7 +13,9 @@ import { flagState, NAV_STATUS, shipType } from '../lib/ais.ts';
 import * as F from '../lib/format.ts';
 import { aircraftPhoto, airframe, airline, checkRoute, route, shipFacts, type Route } from '../lib/enrich.ts';
 import { silhouetteSvg } from '../map/icons.ts';
-import { altColor } from '../map/colors.ts';
+import { altColor, tempColor } from '../map/colors.ts';
+import { weather } from '../state/weather.ts';
+import { humidity, wxKind, wxWords } from '../lib/weather.ts';
 import { isaTemp } from '../state/winds.ts';
 import { AIRPORTS, currentHistory, flyTo, getMap, issNow, onHistory, setRoute } from '../map/mapView.ts';
 
@@ -101,6 +103,8 @@ function render() {
   } else if (s.kind === 'launch') {
     const l = space.launches.find((x) => x.id === s.id);
     if (l) renderLaunch(s.id); else close();
+  } else if (s.kind === 'wx') {
+    renderStation(s.id);
   }
 }
 
@@ -706,27 +710,60 @@ const CATS: Record<string, [string, string]> = {
 };
 const COVER: Record<string, string> = { SKC: 'Clear', CLR: 'Clear', NCD: 'No cloud', NSC: 'No significant cloud', CAVOK: 'Clear, visibility OK', FEW: 'Few', SCT: 'Scattered', BKN: 'Broken', OVC: 'Overcast', VV: 'Sky obscured' };
 
-async function loadMetar(icao: string) {
+async function loadMetar(icao: string, label = 'Weather at the field') {
   let m: any = null;
   try { m = await (await fetch(`/api/metar/${icao}`)).json(); } catch { return; }
   const box = el.querySelector<HTMLElement>('#metar');
   if (!box || app.selection?.id !== icao || !m) return;
+  const nameEl = el.querySelector<HTMLElement>('#wx-name');
+  if (nameEl && m.name) nameEl.textContent = m.name;
   const cat = CATS[m.fltCat];
   const clouds = (m.clouds ?? []).map((c: any) => `${COVER[c.cover] ?? c.cover}${c.base != null ? ` ${F.n0(c.base)} ft` : ''}`).join(', ') || COVER[m.cover] || '—';
   const wind = m.wspd === 0 ? 'Calm' : `${m.wdir === 'VRB' ? 'Variable' : F.heading(Number(m.wdir))} at ${m.wspd} kt${m.wgst ? `, gusting ${m.wgst}` : ''}`;
   const vis = m.visib === '10+' || m.visib === '6+' ? `${m.visib === '6+' ? '10 km' : '10 mi'} or more` : `${m.visib} mi`;
   const age = (Date.now() / 1000 - m.obsTime);
   box.innerHTML = `
-    <div class="deck-h"><span>Weather at the field</span><span>observed ${F.ago(age)}</span></div>
+    <div class="deck-h"><span>${F.esc(label)}</span><span>observed ${F.ago(age)}</span></div>
     <div class="grid deck">
+      ${m.wxString ? cell('Weather', F.esc(cap(wxWords(m.wxString))), F.esc(m.wxString), 'wide') : ''}
       ${cell('Conditions', cat ? `<span class="cat" style="background:${cat[0]}">${F.esc(m.fltCat)}</span>` : '—', cat ? cat[1] : '')}
-      ${cell('Wind', F.esc(wind), m.wspd ? 'surface, magnetic' : '')}
-      ${cell('Visibility', F.esc(vis), '')}
+      ${cell('Wind', F.esc(wind), m.wspd ? 'blowing from, degrees true' : '')}
+      ${cell('Visibility', F.esc(vis), typeof m.visib === 'number' ? `${F.n1(m.visib * 1.609)} km` : '')}
       ${cell('Cloud', F.esc(clouds), '')}
-      ${cell('Temperature', m.temp != null ? `${m.temp} °C` : '—', m.dewp != null ? `dew point ${m.dewp} °C` : '')}
+      ${cell('Temperature', m.temp != null ? `${m.temp} °C` : '—', m.dewp != null ? `dew point ${m.dewp} °C${m.temp != null ? ` · humidity ${Math.round(humidity(m.temp, m.dewp))}%` : ''}` : '')}
       ${cell('Pressure', m.altim != null ? `${Math.round(m.altim)} hPa` : '—', m.altim != null ? `${(m.altim * 0.02953).toFixed(2)} inHg` : '')}
     </div>
     <div class="metar-raw">${F.esc(m.rawOb ?? '')}</div>`;
+}
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const WX_CHIP: Record<string, string> = { storm: 'red', freezing: 'blue', snow: 'blue', rain: 'blue', fog: '', haze: '', dust: 'amber', ash: 'amber' };
+
+/** A weather station: what it measured at its last report. */
+function renderStation(id: string) {
+  const r = weather.byId.get(id);
+  if (!r) return close();
+  const ap = AIRPORTS.find((a) => a[0] === id);
+  const t = r[WX.temp];
+  const words = wxWords(r[WX.wx]);
+  const kind = wxKind(r[WX.wx]);
+  const lat = r[WX.lat], lon = r[WX.lon];
+  open(`
+    ${head(`Weather station · ${ap ? F.esc(ap[4]) + ' ' + flagEmoji(ap[4]) : 'METAR'}`)}
+    <div class="p-title" style="padding-top:22px">
+      <h2 style="font-size:56px${t !== null ? `;color:${tempColor(t)}` : ''}">${t !== null ? `${Math.round(t)}°C` : '—'}</h2>
+      <div class="sub" id="wx-name">${F.esc(ap ? ap[2] : id)}</div>
+      <div class="sub2">${t !== null ? `${Math.round(t * 1.8 + 32)} °F · ` : ''}${F.esc(id)}${ap?.[1] ? ` · ${F.esc(ap[1])}` : ''} · observed ${F.ago(Date.now() / 1000 - r[WX.t])}</div>
+      ${words ? `<span class="chip ${WX_CHIP[kind ?? ''] ?? ''}">${F.esc(cap(words))}</span>` : ''}
+    </div>
+    <div id="metar"></div>
+    <div class="actions">
+      <button class="btn" data-act="fly" data-lon="${lon}" data-lat="${lat}" data-z="9">Zoom to station</button>
+      ${ap ? `<button class="btn" data-act="airport" data-id="${F.esc(id)}">Traffic at ${F.esc(ap[1] || id)}</button>` : ''}
+    </div>
+    <div class="prov">Measured at the station and reported as a METAR, the routine weather report airports and automatic stations send every 30 to 60 minutes and whenever the weather changes. Collected worldwide by NOAA's Aviation Weather Center. Nothing here is forecast.</div>
+  `);
+  loadMetar(id, 'Last report');
 }
 
 function renderIss() {
