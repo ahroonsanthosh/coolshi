@@ -120,6 +120,39 @@ export function initCaption() {
   update();
 }
 
+// Say plainly when the picture isn't live: still connecting (a sleeping
+// free server takes about a minute to wake), sources still coming online
+// after a start, or the connection lost. Silent otherwise.
+function initNotice() {
+  const el = $('notice');
+  const t0 = Date.now();
+  let lostAt = 0;
+  const clock = (ms: number) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  const show = (head: string, body: string, since: number) => {
+    patch(el, `<b>${head}</b><span>${body}</span><span class="t">${clock(Date.now() - since)}</span>`);
+    el.hidden = false;
+  };
+  const tick = () => {
+    const now = Date.now();
+    if (!picture.lastAirOk) {
+      if (now - t0 < 4000) return;
+      return show('Connecting', 'The server sleeps when nobody is watching and can take about a minute to wake.', t0);
+    }
+    if (!picture.connected || now - picture.lastAirOk > 15_000) {
+      lostAt ||= picture.lastAirOk;
+      return show('Reconnecting', 'Lost touch with the server. Tracks fade as their reports age; they come back on their own.', lostAt);
+    }
+    lostAt = 0;
+    const srcs = (picture.world?.sources ?? []).filter((s) => s.kind === 'air' || s.kind === 'sea');
+    const fresh = srcs.filter((s) => s.lastOk > 0).length;
+    if (now - t0 < 180_000 && srcs.length && fresh < srcs.length / 2 && picture.aircraft.size < 1500) {
+      return show('Warming up', `${fresh} of ${srcs.length} sources in so far, ${F.n0(picture.aircraft.size)} aircraft. The picture fills in over a minute or two.`, t0);
+    }
+    el.hidden = true;
+  };
+  setInterval(tick, 1000);
+}
+
 export function describe(kind: string, id: string): [string, string] | null {
   if (kind === 'air') {
     const a = picture.aircraft.get(id);
@@ -206,6 +239,7 @@ export function initStatus() {
   };
   draw();
   setInterval(draw, 2000);
+  initNotice();
   const lg = $('legend');
   const drawLegend = () => {
     lg.innerHTML = `<div>Altitude</div><div class="ramp" style="background:${altGradientCss()}"></div>

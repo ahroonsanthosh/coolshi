@@ -22,12 +22,20 @@ import { news } from '../state/news.ts';
 import { space, countdown } from '../state/space.ts';
 import { altitude } from '../lib/format.ts';
 import { COARSE_POINTER, REDUCED_MOTION } from '../lib/motion.ts';
-import airportsRaw from '../data/airports.json';
 
 type FC = GeoJSON.FeatureCollection;
 const fc = (features: GeoJSON.Feature[] = []): FC => ({ type: 'FeatureCollection', features });
 
-export const AIRPORTS = airportsRaw as [string, string, string, string, string, number, number, number | null, number][];
+type AirportRow = [string, string, string, string, string, number, number, number | null, number];
+/** 3,300 airports with scheduled service, filled in just after first paint
+ * (the file is a quarter of the page's weight, and nothing needs it to draw
+ * the globe). */
+export const AIRPORTS: AirportRow[] = [];
+const airportsLoaded = import('../data/airports.json').then((m) => {
+  AIRPORTS.push(...(m.default as AirportRow[]));
+  sources.airports?.setData(airportFeatures());
+});
+export const whenAirports = () => airportsLoaded;
 
 let map: MlMap;
 const NIGHT_BANDS = [0, 3, 6, 9, 12, 15, 18];
