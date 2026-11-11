@@ -16,6 +16,7 @@ import { loadWinds, onWinds, winds } from '../state/winds.ts';
 import { loadWeather, onWeather, weather } from '../state/weather.ts';
 import { wxKind, wxWords } from '../lib/weather.ts';
 import { HAZARD_COLOR, hazards, levels, loadHazards, onHazards } from '../state/hazards.ts';
+import { onReplay, replay, setReplayBox } from '../state/replay.ts';
 import { altColorExpr, altColor, EMERGENCY, GROUND, INK, QUAKE, SHIP, SHIP_STILL, tempColorExpr } from './colors.ts';
 import { picture, type Aircraft, type Ship } from '../state/data.ts';
 import { app, type Selection } from '../state/app.ts';
@@ -523,6 +524,7 @@ function setup() {
   setInterval(loadRadar, 5 * 60_000);
   onWeather(() => { drawWeather(); updateClouds(); });
   onHazards(drawHazards);
+  onReplay(() => { replayDirty = true; if (replay.active) setReplayBox(viewBox(map.getZoom(), 0.35)); });
   app.on('selection', () => { if (app.selection?.kind === 'hazard' || hzSel) drawHazards(); });
   const pollHazards = () => { if (app.layers.hazards) loadHazards(); };
   app.on('layers', pollHazards);
@@ -926,9 +928,23 @@ function holds(outer: Box | null, inner: Box | null) {
   return w >= outer[0] && w + (inner[2] - inner[0]) <= outer[2];
 }
 
+let replayDirty = false;
+let wasReplay = false;
+
 function frame(t: number) {
   requestAnimationFrame(frame);
   if (document.hidden) return;
+  // Replay draws the server's snapshots instead of the live picture.
+  if (replay.active || wasReplay) {
+    animatePulse(t);
+    if (!replay.active) { wasReplay = false; needsFull = needsShips = true; }
+    else {
+      wasReplay = true;
+      if (cameraMoved) { cameraMoved = false; setReplayBox(viewBox(map.getZoom(), 0.35)); }
+      if (replayDirty) { replayDirty = false; drawReplay(); }
+      return;
+    }
+  }
   if (cameraMoved) {
     cameraMoved = false;
     // A full redraw only when the view leaves the padded box drawn last time
@@ -1049,6 +1065,33 @@ function drawTracks(z: number) {
   }
   sources.labels.setData(fc(labels.concat(shipLabels)));
   updateSelectionOnly();
+}
+
+function drawReplay() {
+  const sel = app.selection;
+  const selId = sel && (sel.kind === 'air' || sel.kind === 'sea') ? sel.id : '';
+  const air: GeoJSON.Feature[] = [];
+  const sea: GeoJSON.Feature[] = [];
+  for (const t of replay.tracks.values()) {
+    if (t.kind === 'air') {
+      if (!app.layers.aircraft || (app.milOnly && !(t.flags & AF.mil))) continue;
+      const cls = picture.aircraft.get(t.id)?.cls ?? 'unknown';
+      const ground = (t.flags & AF.ground) !== 0;
+      const alt = ground ? -1 : (t.alt ?? 0);
+      air.push({
+        type: 'Feature', geometry: { type: 'Point', coordinates: [t.x, t.y] },
+        properties: { id: t.id, icon: cls, size: ICON_SIZE[cls], rot: t.rot, alt, em: (t.flags & AF.emergency) !== 0, stale: false, est: false, approx: false, sel: t.id === selId, sort: alt },
+      });
+    } else if (app.layers.ships) {
+      sea.push({
+        type: 'Feature', geometry: { type: 'Point', coordinates: [t.x, t.y] },
+        properties: { id: t.id, still: !t.moving, rot: t.rot, sel: t.id === selId, stale: false, sort: t.moving ? 1 : 0 },
+      });
+    }
+  }
+  sources.aircraft.setData(fc(air));
+  sources.ships.setData(fc(sea));
+  sources.labels.setData(fc());
 }
 
 // ---------------------------------------------------------------------------

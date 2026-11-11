@@ -284,6 +284,22 @@ button.chip.hz { border: 1px solid var(--hz); color: var(--hz); background: colo
 .search .hint { margin-top: 14px; font-size: 12px; color: var(--mute); }
 
 /* ---- Alerts ---- */
+/* Replay: a bar where the caption is; the live caption steps aside. */
+.replay {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 9; width: min(760px, calc(100vw - 32px));
+  display: flex; gap: 12px; align-items: center; padding: 8px 10px 8px 14px; border-radius: 26px;
+  background: var(--card); box-shadow: var(--shadow); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  font: 500 12px/1 var(--font);
+}
+.replay .rp-tag { font: 700 10.5px/1 var(--font); letter-spacing: 0.08em; text-transform: uppercase; background: #5c564f; color: #fff; padding: 5px 8px; border-radius: 20px; }
+.replay .rp-time { display: grid; gap: 3px; min-width: 92px; }
+.replay .rp-time b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.replay .rp-time span { color: var(--mute); font-size: 11px; }
+.replay input[type=range] { flex: 1; accent-color: #5c564f; min-width: 60px; }
+.replay button, .replay select { padding: 7px 12px; border-radius: 16px; background: var(--paper-3); color: var(--ink); font: inherit; border: 0; }
+.replay .rp-live { background: var(--ink); color: var(--paper); }
+body.replaying .caption, body.replaying .status, body.replaying .radar-ctl { opacity: 0; pointer-events: none; }
+@media (max-width: 560px) { .replay { flex-wrap: wrap; border-radius: 14px; } .replay input[type=range] { order: 5; flex-basis: 100%; } }
 /* Radar time and loop, above the status line while radar is on. */
 .radar-ctl {
   position: fixed; left: var(--gutter); bottom: 44px; z-index: 6; display: flex; gap: 10px; align-items: center;

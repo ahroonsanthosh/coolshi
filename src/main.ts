@@ -10,6 +10,7 @@ import {
 } from './ui/chrome.ts';
 import { initLinks, linkedAtStart } from './ui/links.ts';
 import { initWatch } from './ui/watch.ts';
+import { initReplay, toggleReplay } from './ui/replay.ts';
 import type { Gallery } from './gallery/gallery.ts';
 
 const mapReady = createMap(document.getElementById('map')!);
@@ -47,10 +48,12 @@ const home = () => {
   getMap().flyTo({ center: [getMap().getCenter().lng, 25], zoom: 1.7, speed: 1.2 });
 };
 
-initKeys({ index: toggleIndex, home });
+initKeys({ index: toggleIndex, home, replay: toggleReplay });
+initReplay();
 app.on('selection', () => {
   const s = app.selection;
   picture.seaSel = s?.kind === 'sea' ? Number(s.id.slice(2)) : 0;
+  picture.airSel = s?.kind === 'air' ? s.id.slice(2) : '';
   // On a phone the drawers and the details sheet share the bottom of the
   // screen: picking something from a list makes way for its sheet.
   if (s && matchMedia('(max-width: 760px)').matches) { toggleNearby(false); toggleLog(false); }
@@ -69,6 +72,7 @@ document.querySelector('.top')!.addEventListener('click', (e) => {
 });
 document.getElementById('status')!.addEventListener('click', (e) => {
   if ((e.target as HTMLElement).closest('[data-act="about"]')) openAbout();
+  if ((e.target as HTMLElement).closest('[data-act="replay"]')) toggleReplay();
 });
 document.addEventListener('pointerdown', (e) => {
   const lp = document.getElementById('layers')!;

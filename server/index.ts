@@ -19,6 +19,8 @@ import { Estimator } from './estimates.ts';
 import { AisStream, Digitraffic } from './feeds/ships.ts';
 import { Gdacs, Iss, Usgs } from './feeds/events.ts';
 import { Clouds, Hazards, Metars } from './feeds/weather.ts';
+import { Replay } from './replay.ts';
+import { searchShips } from './search.ts';
 import { Gazetteer, News } from './feeds/news.ts';
 import { Launches, Spacecraft } from './feeds/space.ts';
 import { every, getJson, HttpError, Status } from './feeds/http.ts';
@@ -55,6 +57,14 @@ const gdacs = new Gdacs();
 const metars = new Metars();
 const clouds = new Clouds();
 const hazards = new Hazards();
+// A snapshot a minute while anyone has watched in the last hour, so the
+// replay has the recent past when someone asks for it.
+const replay = new Replay();
+let lastWatched = 0;
+setInterval(() => {
+  if (watching()) lastWatched = Date.now();
+  if (Date.now() - lastWatched < 3600_000) replay.snapshot(air.values(), sea.values());
+}, 60_000);
 const iss = new Iss();
 const spacecraft = new Spacecraft();
 const launches = new Launches();
@@ -378,7 +388,7 @@ const server = http.createServer(async (req, res) => {
       const b = url.searchParams.get('bbox')?.split(',').map(Number);
       const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
       const rows = sea.inView(box, box ? 15_000 : 5_000, Number(url.searchParams.get('sel')) || 0);
-      return sendJson(req, res, { now: Date.now(), full: true, rows, removed: [] });
+      return sendJson(req, res, { now: Date.now(), seq: Date.now(), full: true, rows, removed: [] });
     }
     if (p === '/api/world') {
       const body: WorldPayload = {
@@ -394,6 +404,13 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/winds') return sendJson(req, res, windsCached());
     if (p === '/api/weather') return sendJson(req, res, weatherBody(), true);
     if (p === '/api/hazards') return sendJson(req, res, hazardBody(), true);
+    if (p === '/api/search') return sendJson(req, res, { ships: searchShips(sea.values(), url.searchParams.get('q') ?? '') });
+    if (p === '/api/replay') return sendJson(req, res, replay.index());
+    if (p === '/api/replay/frame') {
+      const b = url.searchParams.get('bbox')?.split(',').map(Number);
+      const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
+      return sendJson(req, res, replay.frame(Number(url.searchParams.get('t')) || Date.now(), box));
+    }
     if (p === '/api/space') {
       const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };
       return sendJson(req, res, body);

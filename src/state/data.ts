@@ -7,7 +7,7 @@ import { A, AF, S, type AircraftRow, type Delta, type ShipRow, type WorldPayload
 import { bearing, destination, KT } from '../../shared/geo.ts';
 import { classify, type AcClass } from '../lib/aircraft.ts';
 import { isStationary } from '../lib/ais.ts';
-import { watchedShips } from './watch.ts';
+import { watchedAircraft, watchedShips } from './watch.ts';
 
 export interface Track {
   kind: 'air' | 'sea';
@@ -72,7 +72,16 @@ export class Picture {
   ships = new Map<string, Ship>();
   world: WorldPayload | null = null;
   listeners = new Set<(what: 'air' | 'sea' | 'world') => void>();
+  // Aircraft come in two rhythms: what is in view every 2 s, the rest of
+  // the world every 10 s. Each has its own change cursor.
   private airSince = 0;
+  private airWorldSince = 0;
+  private airWorldAt = 0;
+  /** Hex of the selected aircraft, always sent even when out of view. */
+  airSel = '';
+  // Ships: a cursor for the box they were asked for; a new box starts over.
+  private seaSince = 0;
+  private seaKey = '';
   private clientId = Math.random().toString(36).slice(2, 10);
   view: { lat: number; lon: number; r: number; bbox?: [number, number, number, number] | null } = { lat: 30, lon: 10, r: 5000 };
   /** MMSI of the selected ship, always sent even when out of view. */
@@ -102,7 +111,7 @@ export class Picture {
       };
       tick();
     };
-    loop(() => this.pollAir(), () => 2000);
+    loop(() => this.pollAir(), () => (this.view.bbox ? 2000 : 4000));
     // Ships: one request at a time. A refresh asked for while one is in
     // flight runs right after it, so replies can't arrive out of order and
     // an older view's reply can't wipe a newer view's ships.
@@ -118,7 +127,7 @@ export class Picture {
       try { await this.pollSea(); } catch (e) { console.warn(e); }
       this.seaBusy = false;
       if (this.seaAgain) { this.seaAgain = false; schedule(250); return; }
-      schedule(document.hidden ? 30_000 : this.view.bbox ? 10_000 : 20_000);
+      schedule(document.hidden ? 30_000 : this.view.bbox ? 10_000 : 30_000);
     };
     this.refreshSea = () => {
       if (this.seaBusy) { this.seaAgain = true; return; }
@@ -131,9 +140,15 @@ export class Picture {
 
   private async pollAir() {
     const vp = `${this.view.lat.toFixed(3)},${this.view.lon.toFixed(3)},${Math.round(this.view.r)}`;
+    const b = this.view.bbox;
+    const world = !b || !this.airWorldSince || Date.now() - this.airWorldAt > 10_000;
+    const want = [this.airSel, ...watchedAircraft()].filter(Boolean);
+    const q = `since=${world ? this.airWorldSince : this.airSince}&c=${this.clientId}&vp=${vp}`
+      + (world ? '' : `&bbox=${b!.map((v) => v.toFixed(2)).join(',')}`)
+      + (want.length ? `&want=${want.join(',')}` : '');
     let res: Response;
     try {
-      res = await fetch(`/api/air?since=${this.airSince}&c=${this.clientId}&vp=${vp}`);
+      res = await fetch(`/api/air?${q}`);
     } catch {
       this.connected = false;
       return;
@@ -150,7 +165,8 @@ export class Picture {
     }
     for (const r of d.rows) this.upsertAir(r, now);
     for (const hex of d.removed) this.aircraft.delete(`a:${hex}`);
-    this.airSince = d.now;
+    this.airSince = d.seq;
+    if (world || d.full) { this.airWorldSince = d.seq; this.airWorldAt = Date.now(); }
     this.emit('air');
   }
 
@@ -196,14 +212,18 @@ export class Picture {
   private async pollSea() {
     const b = this.view.bbox;
     const watch = watchedShips();
-    const q = `${b ? `bbox=${b.map((v) => v.toFixed(2)).join(',')}&` : ''}sel=${this.seaSel}${watch.length ? `&watch=${watch.join(',')}` : ''}`;
+    const key = b ? b.map((v) => v.toFixed(2)).join(',') : 'world';
+    // Same box as last time: only what changed since. A new box: all of it.
+    const since = key === this.seaKey ? this.seaSince : 0;
+    const q = `${b ? `bbox=${key}&` : ''}since=${since}&sel=${this.seaSel}${watch.length ? `&watch=${watch.join(',')}` : ''}`;
     const res = await fetch(`/api/sea?${q}`).catch(() => null);
     if (!res?.ok) return;
     const d = (await res.json()) as Delta<ShipRow>;
     const now = Date.now();
+    const keepAlways = new Set([this.seaSel, ...watch].filter(Boolean).map(String));
     if (d.full) {
       const keep = new Set(d.rows.map((r) => String(r[S.mmsi])));
-      for (const k of this.ships.keys()) if (!keep.has(k.slice(2))) this.ships.delete(k);
+      for (const k of this.ships.keys()) if (!keep.has(k.slice(2)) && !keepAlways.has(k.slice(2))) this.ships.delete(k);
     }
     for (const r of d.rows) {
       const id = `s:${r[S.mmsi]}`;
@@ -233,6 +253,15 @@ export class Picture {
       }
     }
     for (const m of d.removed) this.ships.delete(`s:${m}`);
+    // Ships that sailed out of the box are dropped here; the server only
+    // sends what changed.
+    if (!d.full && b) {
+      const [w, so, e, n] = b;
+      const inLon = (lon: number) => (w <= e ? lon >= w && lon <= e : lon >= w || lon <= e);
+      for (const [k, s] of this.ships) if (!keepAlways.has(k.slice(2)) && !(s.lat >= so && s.lat <= n && inLon(s.lon))) this.ships.delete(k);
+    }
+    this.seaSince = d.seq ?? 0;
+    this.seaKey = key;
     this.emit('sea');
   }
 

@@ -20,7 +20,8 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 - **Day and night**: the terminator plus civil, nautical and astronomical twilight, in 3° bands.
 - **Weather now** (`C`): the weather measured at about 5,000 stations worldwide in the last three hours (every METAR, from NOAA's Aviation Weather Center). A dot coloured by air temperature, a ring where it is raining, snowing, storming or foggy, an arrow showing where the surface wind is blowing, and the numbers in words when you zoom in. Click a station for its last report, decoded: conditions, wind, visibility, cloud, temperature, humidity and pressure.
 - **Satellite clouds** (`V`): the newest infrared picture from the ring of geostationary satellites (EUMETSAT's mosaic of Meteosat, GOES and Himawari, every three hours, its time stated), redrawn so clear sky is transparent and cloud is shading, deeper where the tops are colder and higher.
-- **Weather radar** (RainViewer), **airports** (3,300 with scheduled service) and **callsign labels**.
+- **Aviation hazards** (`Z`): every SIGMET in force worldwide, the warnings meteorological offices issue for weather dangerous to all aircraft (thunderstorms, severe turbulence and icing, volcanic ash, tropical cyclones, mountain waves), with the levels they cover and how long they last. Each has a sheet listing the aircraft flying through it now; an aircraft's own sheet says when it is inside one at its altitude, and the Log lists every aircraft that is.
+- **Weather radar** (`R`, RainViewer) with its time, and a loop of the last two hours. **Airports** (3,300 with scheduled service) and **callsign labels**.
 
 **What the aircraft itself says.** Many airliners broadcast far more than position, and Watchman shows it: the altitude and heading set on the autopilot and whether it is climbing to it, the autopilot modes engaged (LNAV, VNAV, approach, TCAS), indicated and true airspeed and Mach, bank angle and turn rate, the altimeter setting, outside air temperature against the standard atmosphere, the wind it is flying through split into headwind and crosswind, and how accurate its position is.
 
@@ -30,7 +31,7 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 
 **Ships, in depth.** Registry particulars (year built, gross tonnage, deadweight, registry and home port, nearest town) and the last day of track from Open Waters, plus photos and class from Wikidata.
 
-**The details sheet.** Click anything. For an aircraft: a photo of the actual airframe with the photographer's credit, its type, operator and registration, the country of registration from its ICAO address, the route with a progress bar, distance flown and to go and an arrival estimate, altitude (pressure and GNSS), vertical rate, ground speed, track, squawk, how its position was obtained (ADS-B, MLAT or TIS-B), report age, and an altitude and speed profile of its flight so far. For a ship: type, flag, destination and ETA, size, draught, rate of turn, and a photo and particulars from Wikidata when it has an IMO entry. Airports show live arrivals, departures and whether it is day or night there; earthquakes show depth, felt reports, tsunami flag and PAGER alert.
+**The details sheet.** Click anything. For an aircraft: a photo of the actual airframe with the photographer's credit, its type, operator and registration, the country of registration from its ICAO address, the route with a progress bar, distance flown and to go and an arrival estimate, altitude (pressure and GNSS), vertical rate, ground speed, track, squawk, how its position was obtained (ADS-B, MLAT or TIS-B), report age, and an altitude and speed profile of its flight so far. For a ship: type, flag, destination and ETA, size, draught, rate of turn, and a photo and particulars from Wikidata when it has an IMO entry. Airports show live arrivals, departures and whether it is day or night there; earthquakes show depth, felt reports, tsunami flag and PAGER alert. Under a verified route, the destination's weather right now. When a track drops out of the feed the sheet says so and keeps counting the age of its last report.
 
 **The Index** (`I`). The picture right now, as posters: aircraft aloft by altitude band, the highest and fastest aircraft, emergency squawks, the strongest earthquake of the week, the past day's quakes on a world map, where the sun is rising and setting, the ISS, ships under way, the busiest approach, military traffic, disaster alerts. They hang on cloth in WebGL, ripple, and bend as you scroll or drag through them. Click one to fly there.
 
@@ -44,9 +45,15 @@ Nothing is simulated, and nothing is guessed. Every number on screen comes from 
 
 **Log** (`K`). The unusual things in the sky right now: emergencies, spacecraft, the next launches, drones (ADS-B category UAV, or a drone type such as Reaper, Global Hawk or Triton) and military aircraft by type. First sightings of each are written to a log kept on this device. Tanks and other ground vehicles carry no public transponder, so no open source can show them.
 
-**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination; airports by code, name or city; earthquakes by place; spacecraft by name or NORAD number; launches; and news headlines.
+**Search** (`/` or Ctrl K) finds aircraft by callsign, registration, ICAO address, squawk or type; ships by name, MMSI, IMO or destination, anywhere in the world (not only those on screen); airports by code, name or city; earthquakes by place; spacecraft by name or NORAD number; launches; and news headlines.
 
 **Alerts** appear when an aircraft squawks 7500, 7600 or 7700 (once a second report confirms it) or a magnitude 5.5+ earthquake strikes.
+
+**Watch** an aircraft or ship from its sheet: a note (and a system notification when the tab is in the background, if you allow it) when it comes into range, takes off, lands, squawks an emergency, gets under way or stops. The Log lists what you are watching. The list stays on your device.
+
+**Replay** (`P`, or Replay at the bottom): the last few hours from snapshots the server takes every minute, scrubbed with a slider or played at 30, 60 or 240 times real speed, positions blended between snapshots.
+
+**Links** carry what is on screen: the view, the selection and any layers you changed, for example `/#@51.4700,-0.4500,8.50/a:4ca7b4/layers:+weather`. Older links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) still work, a ship link opens a ship anywhere in the world, and a link to something no longer tracked says so.
 
 ## Accuracy
 
@@ -151,13 +158,14 @@ Photos (Planespotters), airframes and routes (adsbdb), ship particulars (Wikidat
 | `W` | Winds aloft |
 | `C` | Weather now, measured at stations |
 | `V` | Satellite clouds |
+| `Z` | Aviation hazards (SIGMETs) |
+| `P` | Replay |
 | `F` | Follow the selected track |
 | `G` | Back to the whole globe |
 | `R` / `N` / `A` / `E` / `T` | Radar / day and night / airports / earthquakes / trail |
 | `Esc` | Close, or clear the selection |
 
-Links like `/#a:a5954e` (aircraft) or `/#s:230123456` (ship) open with that track selected.
 
 ## Data and credits
 
-Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); NOAA Aviation Weather Center (METAR); EUMETSAT (geostationary infrared); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.
+Open Waters AIS (openwaters.io); AISHub; BarentsWatch (NLOD); OpenSky Network; adsb.fi; adsb.lol; airplanes.live; adsb.one; Fintraffic Digitraffic (CC BY 4.0); Kystverket, Norwegian Coastal Administration (NLOD); AISStream; USGS; GDACS (European Commission, UN); NOAA Aviation Weather Center (METARs and SIGMETs); EUMETSAT (geostationary infrared); wheretheiss.at; RainViewer; Planespotters.net (photos credited to their photographers); adsbdb; Wikidata and Wikimedia Commons; tar1090-db (Mictronics, wiedehopf); OurAirports (public domain); ICAO Annex 10 address blocks; ITU maritime identification digits; OpenFreeMap, OpenMapTiles and © OpenStreetMap contributors; Natural Earth.

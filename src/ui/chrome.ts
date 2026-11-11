@@ -260,7 +260,8 @@ export function initStatus() {
     const cls = !picture.connected || stale ? 'off' : okAir === air.length ? 'live' : 'warn';
     const label = !picture.connected ? 'Offline' : stale ? 'Reconnecting' : os && !os.ok ? 'Live · regional' : 'Live';
     patch(el, `<button data-act="about" title="Sources"><span class="dot ${cls}"></span>${label}</button>
-      <span>${F.n0(counts.airAll)} aircraft</span><span>${F.n0(counts.seaAll)} ships</span>`);
+      <span>${F.n0(counts.airAll)} aircraft</span><span>${F.n0(counts.seaAll)} ships</span>
+      <button data-act="replay" title="Replay the last few hours (P)">Replay</button>`);
   };
   draw();
   setInterval(draw, 2000);
@@ -400,6 +401,9 @@ export function openSearch() {
   const go = (h: Hit | undefined) => {
     if (!h) return;
     closeSearch();
+    // A ship found elsewhere in the world: open it like a link, which asks
+    // the server for it and flies there when it arrives.
+    if (h.kind === 'sea' && !picture.ships.has(h.id)) { location.hash = h.id; return; }
     app.select({ kind: h.kind as any, id: h.id });
     flyTo(h.lon, h.lat, h.kind === 'airport' ? 10 : h.kind === 'quake' ? 6 : h.kind === 'news' ? 6 : h.kind === 'sat' ? 3 : h.kind === 'launch' ? 8 : 8.5);
   };
@@ -407,7 +411,16 @@ export function openSearch() {
   let typing = 0;
   input.addEventListener('input', () => {
     clearTimeout(typing);
-    typing = window.setTimeout(() => { hits = search(input.value); on = 0; draw(); }, 120);
+    typing = window.setTimeout(() => {
+      const q = input.value;
+      hits = search(q); on = 0; draw();
+      searchShips(q).then((more) => {
+        if (input.value !== q || !more.length) return;
+        const seen = new Set(hits.map((h) => h.id));
+        hits = [...hits, ...more.filter((h) => !seen.has(h.id))].sort((a, b) => b.score - a.score).slice(0, 40);
+        draw();
+      });
+    }, 120);
   });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { on = Math.min(hits.length - 1, on + 1); draw(); e.preventDefault(); }
@@ -430,11 +443,8 @@ export function closeSearch() {
   el.innerHTML = '';
 }
 
-function search(q: string): Hit[] {
-  q = q.trim().toUpperCase();
-  if (q.length < 2) return [];
-  const out: Hit[] = [];
-  const score = (field: string, base: number) => {
+function scorer(q: string) {
+  return (field: string, base: number) => {
     if (!field) return 0;
     const f = field.toUpperCase();
     if (f === q) return base + 3;
@@ -442,6 +452,37 @@ function search(q: string): Hit[] {
     if (f.includes(q)) return base + 1;
     return 0;
   };
+}
+
+/** Ships the server knows anywhere in the world (the browser only holds
+ * those in view): [mmsi, name, imo, callsign, type, dest, lat, lon]. */
+type ShipHit = [number, string, number | null, string, number, string, number, number];
+let shipSearch: AbortController | null = null;
+async function searchShips(q: string): Promise<Hit[]> {
+  shipSearch?.abort();
+  q = q.trim().toUpperCase();
+  if (q.length < 3) return [];
+  shipSearch = new AbortController();
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: shipSearch.signal });
+    if (!r.ok) return [];
+    const { ships } = (await r.json()) as { ships: ShipHit[] };
+    const score = scorer(q);
+    return ships.filter(([m]) => !picture.ships.has(`s:${m}`)).map(([mmsi, name, imo, cs, type, dest, lat, lon]) => ({
+      kind: 'sea', id: `s:${mmsi}`, title: name || `MMSI ${mmsi}`, sub: [shipType(type).label, dest && `→ ${dest}`, 'out of view'].filter(Boolean).join(' · '),
+      right: 'Ship', icon: silhouetteSvg('ship', 18, 'var(--sea)'),
+      score: Math.max(score(name, 9), score(String(mmsi), 8), score(imo ? String(imo) : '', 8), score(cs, 7), score(dest, 3)) - 0.5, lon, lat,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function search(q: string): Hit[] {
+  q = q.trim().toUpperCase();
+  if (q.length < 2) return [];
+  const out: Hit[] = [];
+  const score = scorer(q);
   for (const a of picture.aircraft.values()) {
     if (acHidden(a)) continue;
     const r = a.row;
@@ -590,6 +631,7 @@ export function openAbout() {
             <kbd>C</kbd><span>Weather now, measured at stations</span>
             <kbd>V</kbd><span>Satellite clouds</span>
             <kbd>Z</kbd><span>Aviation hazards (SIGMETs)</span>
+            <kbd>P</kbd><span>Replay the last few hours</span>
             <kbd>R</kbd><span>Weather radar</span>
             <kbd>N</kbd><span>Day and night</span>
             <kbd>Esc</kbd><span>Close, or clear the selection</span>
@@ -669,7 +711,7 @@ export function initIntro(ready: Promise<unknown>) {
 // ---------------------------------------------------------------------------
 // Keyboard
 
-export function initKeys(handlers: { index: () => void; home: () => void }) {
+export function initKeys(handlers: { index: () => void; home: () => void; replay: () => void }) {
   document.addEventListener('keydown', (e) => {
     const inField = (e.target as HTMLElement).closest('input, textarea');
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); return; }
@@ -678,6 +720,7 @@ export function initKeys(handlers: { index: () => void; home: () => void }) {
     const k = e.key;
     if (k === 'Escape') {
       if (!$('search').hidden) return closeSearch();
+      if (!$('replay').hidden) return handlers.replay();
       if (!$('about').hidden) return closeAbout();
       if (!$('layers').hidden) return toggleLayersPanel(false);
       if (!$('news').hidden) return toggleNews(false);
@@ -701,6 +744,7 @@ export function initKeys(handlers: { index: () => void; home: () => void }) {
     else if (k === 'c' || k === 'C') app.setLayer('weather', !app.layers.weather);
     else if (k === 'v' || k === 'V') app.setLayer('clouds', !app.layers.clouds);
     else if (k === 'z' || k === 'Z') app.setLayer('hazards', !app.layers.hazards);
+    else if (k === 'p' || k === 'P') handlers.replay();
     else if (k === 'w' || k === 'W') app.setLayer('winds', !app.layers.winds);
     else if (k === 'm' || k === 'M') app.setMilOnly(!app.milOnly);
     else if (k === 'n' || k === 'N') app.setLayer('night', !app.layers.night);

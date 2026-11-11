@@ -248,7 +248,7 @@ export class AirStore {
     for (const a of this.map.values()) if (full || a.upd > since) rows.push(a.row);
     const removed: string[] = [];
     if (!full) for (const [hex, t] of this.tomb) if (t > since) removed.push(hex);
-    return { now, full, rows, removed };
+    return { now, seq: now, full, rows, removed };
   }
 }
 
@@ -398,6 +398,6 @@ export class SeaStore {
     for (const s of this.map.values()) if (full || s.upd > since) rows.push(s.row);
     const removed: number[] = [];
     if (!full) for (const [k, t] of this.tomb) if (t > since) removed.push(k);
-    return { now, full, rows, removed };
+    return { now, seq: now, full, rows, removed };
   }
 }

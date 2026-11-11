@@ -41,6 +41,9 @@ export type ShipRow = [
 
 export interface Delta<R> {
   now: number; // server ms
+  /** Change cursor: send it back as `since` to get only what changed after
+   * it. Starts from the server's boot time, so a restart forces a full send. */
+  seq: number;
   full: boolean;
   rows: R[];
   removed: (string | number)[];
@@ -131,3 +134,13 @@ export interface Hazard {
   rings: [number, number][][];
 }
 export interface HazardPayload { at: number; items: Hazard[] }
+
+/** Replay: snapshots of every track, kept on the server for a few hours. */
+export interface ReplayIndex { step: number; frames: number[] }
+/** One snapshot. Aircraft: [hex, lat, lon, alt ft | null, track ° | null, flags].
+ * Ships: [mmsi, lat, lon, course ° | null, moving 0/1]. */
+export interface ReplayFrame {
+  t: number;
+  air: [string, number, number, number | null, number | null, number][];
+  sea: [number, number, number, number | null, number][];
+}
