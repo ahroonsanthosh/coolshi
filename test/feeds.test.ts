@@ -75,3 +75,16 @@ test('store: a rough area never overwrites a fresh real position', () => {
   assert.equal(r[4], 750);
   assert.equal(r[14] & AF.approx, 0);
 });
+
+test('opensky: category indices follow the states API (13 reserved, 14 UAV, 15 space), ground vehicles dropped', async () => {
+  const { parseStates, CATS } = await import('../server/feeds/opensky.ts');
+  const st = (hex: string, cat: number) => [hex, 'TEST1   ', 'X', 1000, 1000, 10, 50, 1000, false, 100, 90, 0, null, 1000, '1234', false, 0, cat];
+  const out = parseStates([st('a00001', 2), st('a00008', 8), st('a0000c', 12), st('a0000d', 13), st('a0000e', 14), st('a0000f', 15),
+    st('a00010', 16), st('a00011', 17), st('a00012', 18), st('a00013', 19), st('a00014', 20), st('a00015', 0)], 150);
+  assert.deepEqual(out.map((r) => [r.hex, r.cat]), [
+    ['a00001', 'A1'], ['a00008', 'A7'], ['a0000c', 'B4'], ['a0000d', ''], ['a0000e', 'B6'], ['a0000f', 'B7'], ['a00015', ''],
+  ]);
+  assert.equal(CATS.length, 21);
+  assert.equal(out[0].alt, Math.round(1000 / 0.3048));
+  assert.equal(out[0].cs, 'TEST1');
+});
