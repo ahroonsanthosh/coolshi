@@ -107,6 +107,7 @@ Everything is optional; copy `.env.example` to `.env`.
 | `OPENSKY_POLL_S` | Seconds between worldwide polls. |
 | `AISSTREAM_API_KEY` | Worldwide ships from AISStream (free key at aisstream.io). Without it, ships come from Fintraffic's open feed for the Baltic. |
 | `PORT` | Port for the aggregator and the built site (default 8080). |
+| `TRUST_PROXY_HOPS` | How many proxies in front of the server add to X-Forwarded-For (default 1, as on Render). Per-address limits use the address the nearest one saw, and only when the connection comes from a private address; 0 ignores the header. |
 
 ### Free coverage, no keys
 

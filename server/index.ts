@@ -324,7 +324,7 @@ const lookupLimit = new KeyedLimiter(1, 10);
 // The client's address, from X-Forwarded-For's first hop behind Render's
 // proxy (see clientIp). TRUST_PROXY_HOPS=0 ignores the header; 2 if
 // another proxy sits in front. Logged once so a deploy can check it.
-const PROXY_HOPS = Math.max(0, Number(process.env.TRUST_PROXY_HOPS ?? 1) || 0);
+const PROXY_HOPS = Math.max(0, Math.floor(Number(process.env.TRUST_PROXY_HOPS || 1)) || 0); // unset or empty: 1
 let xffNoted = false;
 function ipOf(req: http.IncomingMessage): string {
   const xff = req.headers['x-forwarded-for'];
