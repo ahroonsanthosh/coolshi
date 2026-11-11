@@ -7,7 +7,7 @@ import { A, AF, S, type AircraftRow, type Delta, type ShipRow, type WorldPayload
 import { bearing, destination, KT } from '../../shared/geo.ts';
 import { classify, type AcClass } from '../lib/aircraft.ts';
 import { isStationary } from '../lib/ais.ts';
-import { watchedAircraft, watchedShips } from './watch.ts';
+import { watchedShips } from './watch.ts';
 
 export interface Track {
   kind: 'air' | 'sea';
@@ -72,13 +72,11 @@ export class Picture {
   ships = new Map<string, Ship>();
   world: WorldPayload | null = null;
   listeners = new Set<(what: 'air' | 'sea' | 'world') => void>();
-  // Aircraft come in two rhythms: what is in view every 2 s, the rest of
-  // the world every 10 s. Each has its own change cursor.
+  /** Change cursor: the server sends only what changed after it. Every
+   * aircraft in the world comes this way: with nothing resent unchanged it
+   * costs about the same as the view alone, and keeps the Log, the alerts
+   * and the Index current everywhere. */
   private airSince = 0;
-  private airWorldSince = 0;
-  private airWorldAt = 0;
-  /** Hex of the selected aircraft, always sent even when out of view. */
-  airSel = '';
   // Ships: a cursor for the box they were asked for; a new box starts over.
   private seaSince = 0;
   private seaKey = '';
@@ -111,7 +109,7 @@ export class Picture {
       };
       tick();
     };
-    loop(() => this.pollAir(), () => (this.view.bbox ? 2000 : 4000));
+    loop(() => this.pollAir(), () => 2000);
     // Ships: one request at a time. A refresh asked for while one is in
     // flight runs right after it, so replies can't arrive out of order and
     // an older view's reply can't wipe a newer view's ships.
@@ -140,12 +138,7 @@ export class Picture {
 
   private async pollAir() {
     const vp = `${this.view.lat.toFixed(3)},${this.view.lon.toFixed(3)},${Math.round(this.view.r)}`;
-    const b = this.view.bbox;
-    const world = !b || !this.airWorldSince || Date.now() - this.airWorldAt > 10_000;
-    const want = [this.airSel, ...watchedAircraft()].filter(Boolean);
-    const q = `since=${world ? this.airWorldSince : this.airSince}&c=${this.clientId}&vp=${vp}`
-      + (world ? '' : `&bbox=${b!.map((v) => v.toFixed(2)).join(',')}`)
-      + (want.length ? `&want=${want.join(',')}` : '');
+    const q = `since=${this.airSince}&c=${this.clientId}&vp=${vp}`;
     let res: Response;
     try {
       res = await fetch(`/api/air?${q}`);
@@ -166,7 +159,6 @@ export class Picture {
     for (const r of d.rows) this.upsertAir(r, now);
     for (const hex of d.removed) this.aircraft.delete(`a:${hex}`);
     this.airSince = d.seq;
-    if (world || d.full) { this.airWorldSince = d.seq; this.airWorldAt = Date.now(); }
     this.emit('air');
   }
 

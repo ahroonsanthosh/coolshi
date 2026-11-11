@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { AirStore, SeaStore, type AircraftReport } from './store.ts';
+import { AirStore, SeaStore, type Box, type AircraftReport } from './store.ts';
 import { AircraftDb } from './aircraftDb.ts';
 import { OpenSky } from './feeds/opensky.ts';
 import { parseReadsb, type Provider } from './feeds/readsb.ts';
@@ -268,6 +268,14 @@ function weatherBody(): WeatherPayload {
   return wxBody;
 }
 
+/** A box from the query string, [west, south, east, north], or null. */
+function parseBox(v: string | null): Box | null {
+  const b = v?.split(',').map(Number);
+  if (!b || b.length !== 4 || !b.every(isFinite)) return null;
+  const lon = (x: number) => ((((x + 180) % 360) + 360) % 360) - 180;
+  return [lon(b[0]), Math.max(-90, b[1]), lon(b[2]), Math.min(90, b[3])];
+}
+
 let hzBody: HazardPayload | null = null;
 function hazardBody(): HazardPayload {
   // Drop warnings that expired since the last poll.
@@ -371,15 +379,20 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     if (/^\/api\/(metar|detail\/sea)\//.test(p) && !lookupLimit.take(ip)) return tooMany(res, lookupLimit.retryAfter(ip));
     if (p === '/api/air') {
       registerView(url.searchParams.get('c'), url.searchParams.get('vp'), ip);
-      if (!Number(url.searchParams.get('since')) && !fullLimit.take(ip)) return tooMany(res, fullLimit.retryAfter(ip));
-      return sendJson(req, res, air.delta(Number(url.searchParams.get('since')) || 0));
+      // Only what changed after the browser's cursor; a whole world (the
+      // costly answer) is rate-limited per address.
+      const since = Number(url.searchParams.get('since')) || 0;
+      if (!air.cursorValid(since) && !fullLimit.take(ip)) return tooMany(res, fullLimit.retryAfter(ip));
+      return await sendJson(req, res, air.delta(since));
     }
     if (p === '/api/sea') {
-      // The ships in the viewer's box (or the busiest of them), whole each time.
-      const b = url.searchParams.get('bbox')?.split(',').map(Number);
-      const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
-      const rows = sea.inView(box, box ? 15_000 : 5_000, Number(url.searchParams.get('sel')) || 0);
-      return sendJson(req, res, { now: Date.now(), seq: Date.now(), full: true, rows, removed: [] });
+      // The ships in the viewer's box (or the busiest of them): all of them
+      // when the box is new, then what changed; selected and watched ships
+      // wherever they are.
+      const box = parseBox(url.searchParams.get('bbox'));
+      const want = new Set([url.searchParams.get('sel') ?? '', ...(url.searchParams.get('watch') ?? '').split(',')]
+        .map(Number).filter((m) => Number.isInteger(m) && m > 99_999 && m < 1_000_000_000).slice(0, 25));
+      return await sendJson(req, res, sea.view(box, box ? 15_000 : 5_000, Number(url.searchParams.get('since')) || 0, want));
     }
     if (p === '/api/world') {
       const body: WorldPayload = {
@@ -398,9 +411,7 @@ async function serve(req: http.IncomingMessage, res: http.ServerResponse) {
     if (p === '/api/search') return await sendJson(req, res, { ships: searchShips(sea.values(), url.searchParams.get('q') ?? '') });
     if (p === '/api/replay') return await sendJson(req, res, replay.index());
     if (p === '/api/replay/frame') {
-      const b = url.searchParams.get('bbox')?.split(',').map(Number);
-      const box = b && b.length === 4 && b.every(isFinite) ? (b as [number, number, number, number]) : null;
-      return await sendJson(req, res, replay.frame(Number(url.searchParams.get('t')) || Date.now(), box));
+      return await sendJson(req, res, replay.frame(Number(url.searchParams.get('t')) || Date.now(), parseBox(url.searchParams.get('bbox'))));
     }
     if (p === '/api/space') {
       const body: SpacePayload = { now: Date.now(), sats: spacecraft.sats, launches: launches.launches };

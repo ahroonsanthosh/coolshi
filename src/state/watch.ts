@@ -32,11 +32,6 @@ export function toggleWatched(id: string, label: string): boolean {
   return true;
 }
 
-/** Aircraft to ask for wherever they are (ICAO hex). */
-export function watchedAircraft(): string[] {
-  return [...watchlist.keys()].filter((k) => k.startsWith('a:')).map((k) => k.slice(2)).slice(0, 20);
-}
-
 /** Ships to ask the server for wherever they are (MMSIs). */
 export function watchedShips(): number[] {
   return [...watchlist.keys()].filter((k) => k.startsWith('s:')).map((k) => Number(k.slice(2))).slice(0, 20);

@@ -41,9 +41,50 @@ export interface AircraftReport {
   cadence: number;
 }
 
+/**
+ * Change numbers. Every real change to a track takes the next number, and a
+ * browser asks for what changed after the last number it saw, so nothing is
+ * missed (two changes in the same millisecond, a clock stepping back) and
+ * nothing unchanged is sent again. Numbers start from the boot time in
+ * microseconds: a cursor from before a restart is always below them, and
+ * gets everything.
+ */
+export class Changes<K> {
+  seq = Date.now() * 1000;
+  /** Cursors below this may have missed a removal no longer remembered. */
+  private floor = this.seq;
+  private tomb = new Map<K, [seq: number, t: number]>();
+  next() { return ++this.seq; }
+  removed(k: K, now: number) { this.tomb.set(k, [this.next(), now]); }
+  revived(k: K) { this.tomb.delete(k); }
+  prune(now: number, keepMs = 600_000) {
+    for (const [k, [s, t]] of this.tomb) if (now - t > keepMs) { this.tomb.delete(k); if (s > this.floor) this.floor = s; }
+  }
+  /** Can a delta be built from this cursor, or must it be a full send? */
+  valid(since: number) { return since >= this.floor && since <= this.seq; }
+  removedSince(since: number): K[] {
+    const out: K[] = [];
+    for (const [k, [s]] of this.tomb) if (s > since) out.push(k);
+    return out;
+  }
+}
+
+/** [west, south, east, north]; may cross the antimeridian. */
+export type Box = [number, number, number, number];
+export function inBox(box: Box, lat: number, lon: number) {
+  const [w, so, e, n] = box;
+  return lat >= so && lat <= n && (w <= e ? lon >= w && lon <= e : lon >= w || lon <= e);
+}
+
+/** Did a report change anything a browser would see? */
+function differs(a: unknown[], b: unknown[]) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return true;
+  return false;
+}
+
 interface Aircraft {
   row: AircraftRow;
-  upd: number; // server ms of last change
+  upd: number; // change number of the last change
   expires: number; // server ms
   hist: Trail;
   sqStreak: number; // consecutive reports with an emergency squawk
@@ -82,11 +123,12 @@ export class AirStore {
   private map = new Map<string, Aircraft>();
   /** Airframe database, consulted once per new aircraft. */
   identity: IdentityLookup | null = null;
-  private tomb = new Map<string, number>();
-  private bootedAt = Date.now();
+  private changes = new Changes<string>();
 
   get size() { return this.map.size; }
   values() { return [...this.map.values()].map((a) => a.row); }
+  get seq() { return this.changes.seq; }
+  cursorValid(since: number) { return this.changes.valid(since); }
   get(hex: string) { return this.map.get(hex)?.row; }
   history(hex: string): HistoryPoint[] { return this.map.get(hex)?.hist.points() ?? []; }
   extras(hex: string) {
@@ -132,17 +174,20 @@ export class AirStore {
     if (!isFinite(r.lat) || !isFinite(r.lon) || Math.abs(r.lat) > 90 || Math.abs(r.lon) > 180) return;
     if (r.posT * 1000 > now + 5000) r.posT = now / 1000; // clock skew guard
     let a = this.map.get(r.hex);
+    let created = false;
     if (!a) {
       a = {
         row: [r.hex, r.lat, r.lon, r.posT, null, null, null, null, null, '', '', '', '', '', 0, 0, '', '', 0, r.cadence, 0, 0, 0],
-        upd: now, expires: 0, hist: new Trail(HIST_MAX_POINTS, true), sqStreak: 0,
+        upd: 0, expires: 0, hist: new Trail(HIST_MAX_POINTS, true), sqStreak: 0,
       };
+      created = true;
       this.map.set(r.hex, a);
-      this.tomb.delete(r.hex);
+      this.changes.revived(r.hex);
       if (inMilitaryBlock(r.hex)) a.row[14] |= AF.mil;
       this.applyIdentity(a.row);
     }
     const row = a.row;
+    const prev = created ? null : row.slice();
     const newer = r.posT > row[3] + 0.05;
     // Identity fields: take any non-empty value; databases behind adsb.fi and
     // adsb.lol know the type and registration, OpenSky doesn't send them.
@@ -164,7 +209,7 @@ export class AirStore {
       if (typeof r.alt === 'number') row[4] = r.alt;
       if (r.sq) row[12] = r.sq;
       row[14] = flags | (row[14] & (AF.ground | AF.mlat | AF.tisb));
-      a.upd = now;
+      if (!prev || differs(prev, row)) a.upd = this.changes.next();
       return;
     }
     if (newer || row[3] === r.posT) flags = r.approx ? flags | AF.approx : flags & ~AF.approx;
@@ -206,7 +251,7 @@ export class AirStore {
       flags |= row[14] & (AF.ground | AF.mlat | AF.tisb);
     }
     row[14] = flags;
-    a.upd = now;
+    if (!prev || differs(prev, row)) a.upd = this.changes.next();
     // Keep a track for a couple of its source's report intervals.
     const life = Math.max(75, r.cadence * 2.5) * 1000;
     a.expires = Math.max(a.expires, r.posT * 1000 + life);
@@ -252,22 +297,30 @@ export class AirStore {
         // Hold it until about 20 minutes out, when receivers near the
         // destination should be hearing it again.
         a.expires = Math.min(est.eta * 1000 - 1_200_000, now + 10 * 3_600_000);
-        a.upd = now;
+        a.upd = this.changes.next();
         if (a.expires > now) continue;
       }
       this.map.delete(hex);
-      this.tomb.set(hex, now);
+      this.changes.removed(hex, now);
     }
-    for (const [hex, t] of this.tomb) if (now - t > 600_000) this.tomb.delete(hex);
+    this.changes.prune(now);
   }
 
-  delta(since: number, now = Date.now()): Delta<AircraftRow> {
-    const full = !since || now - since > 540_000 || since < this.bootedAt;
+  /**
+   * What changed after `since`: everywhere, or only inside `box` (plus the
+   * aircraft in `want` and every emergency, wherever they are). A cursor
+   * that can't be trusted gets the whole world.
+   */
+  delta(since: number, box: Box | null = null, want: Set<string> | null = null, now = Date.now()): Delta<AircraftRow> {
+    const c = this.changes;
+    const full = !c.valid(since);
     const rows: AircraftRow[] = [];
-    for (const a of this.map.values()) if (full || a.upd > since) rows.push(a.row);
-    const removed: string[] = [];
-    if (!full) for (const [hex, t] of this.tomb) if (t > since) removed.push(hex);
-    return { now, seq: now, full, rows, removed };
+    for (const [hex, a] of this.map) {
+      if (!full && a.upd <= since) continue;
+      const r = a.row;
+      if (full || !box || inBox(box, r[1], r[2]) || want?.has(hex) || (r[14] & AF.emergency)) rows.push(r);
+    }
+    return { now, seq: c.seq, full, rows, removed: full ? [] : c.removedSince(since) };
   }
 }
 
@@ -301,8 +354,7 @@ export class SeaStore {
   private map = new Map<number, Ship>();
   /** Static data that arrived before any position. */
   private pending = new Map<number, ShipReport>();
-  private tomb = new Map<number, number>();
-  private bootedAt = Date.now();
+  private changes = new Changes<number>();
   readonly lifeS = 30 * 60;
 
   get size() { return this.map.size; }
@@ -320,14 +372,15 @@ export class SeaStore {
       }
       s = {
         row: [r.mmsi, r.lat!, r.lon!, 0, null, null, null, 15, '', '', 0, 0, '', '', null, null, null, 0, null, '', ''],
-        upd: now, hist: new Trail(SHIP_HIST_MAX_POINTS, false),
+        upd: 0, hist: new Trail(SHIP_HIST_MAX_POINTS, false),
       };
       this.map.set(r.mmsi, s);
-      this.tomb.delete(r.mmsi);
+      this.changes.revived(r.mmsi);
       const pend = this.pending.get(r.mmsi);
       if (pend) { this.pending.delete(r.mmsi); this.applyStatic(s.row, pend); }
     }
     const row = s.row;
+    const prev = s.upd ? row.slice() : null;
     if (hasPos && r.posT! > row[3]) {
       row[1] = r.lat!; row[2] = r.lon!; row[3] = r.posT!;
       if (r.sog !== undefined) row[4] = r.sog;
@@ -339,7 +392,7 @@ export class SeaStore {
     }
     this.applyStatic(row, r);
     row[17] |= r.src;
-    s.upd = now;
+    if (!prev || differs(prev, row)) s.upd = this.changes.next();
   }
 
   /**
@@ -384,10 +437,10 @@ export class SeaStore {
       const still = r[7] === 1 || r[7] === 5 || (r[4] !== null && r[4] < 0.5);
       if (now / 1000 - r[3] > (still ? 6 * 3600 : this.lifeS)) {
         this.map.delete(k);
-        this.tomb.set(k, now);
+        this.changes.removed(k, now);
       }
     }
-    for (const [k, t] of this.tomb) if (now - t > 600_000) this.tomb.delete(k);
+    this.changes.prune(now);
     if (this.pending.size > 50_000) this.pending.clear();
   }
 
@@ -396,17 +449,29 @@ export class SeaStore {
    * antimeridian), at most `cap` of them: the selected ship, then those under
    * way, then the largest. A world of ships is too much for one browser.
    */
-  inView(box: [number, number, number, number] | null, cap: number, sel: number): ShipRow[] {
-    const [w, so, e, n] = box ?? [-180, -90, 180, 90];
-    const inLon = (lon: number) => (w <= e ? lon >= w && lon <= e : lon >= w || lon <= e);
+  inView(box: Box | null, cap: number, want: Set<number> = new Set(), since = -1): ShipRow[] {
     const hit: ShipRow[] = [];
     for (const s of this.map.values()) {
+      if (s.upd <= since) continue;
       const r = s.row;
-      if (r[0] === sel || (r[1] >= so && r[1] <= n && inLon(r[2]))) hit.push(r);
+      if (want.has(r[0]) || !box || inBox(box, r[1], r[2])) hit.push(r);
     }
     if (hit.length <= cap) return hit;
-    const score = (r: ShipRow) => (r[0] === sel ? 1e9 : 0) + ((r[4] ?? 0) >= 1 ? 1e6 : 0) + (r[15] ?? 0);
+    const score = (r: ShipRow) => (want.has(r[0]) ? 1e9 : 0) + ((r[4] ?? 0) >= 1 ? 1e6 : 0) + (r[15] ?? 0);
     return hit.sort((a, b) => score(b) - score(a)).slice(0, cap);
+  }
+
+  /**
+   * The ships a browser should have for its box: all of them (at most
+   * `cap`) the first time or when the box changed, then only what changed
+   * after its cursor, plus the ones it asked for by MMSI wherever they are.
+   * The whole world (no box) is always sent whole: which ships make the
+   * busiest few thousand keeps changing.
+   */
+  view(box: Box | null, cap: number, since: number, want: Set<number>, now = Date.now()): Delta<ShipRow> {
+    const c = this.changes;
+    if (!box || !c.valid(since)) return { now, seq: c.seq, full: true, rows: this.inView(box, cap, want), removed: [] };
+    return { now, seq: c.seq, full: false, rows: this.inView(box, cap, want, since), removed: c.removedSince(since) };
   }
 
   stats() {
@@ -427,11 +492,10 @@ export class SeaStore {
   }
 
   delta(since: number, now = Date.now()): Delta<ShipRow> {
-    const full = !since || now - since > 540_000 || since < this.bootedAt;
+    const c = this.changes;
+    const full = !c.valid(since);
     const rows: ShipRow[] = [];
     for (const s of this.map.values()) if (full || s.upd > since) rows.push(s.row);
-    const removed: number[] = [];
-    if (!full) for (const [k, t] of this.tomb) if (t > since) removed.push(k);
-    return { now, seq: now, full, rows, removed };
+    return { now, seq: c.seq, full, rows, removed: full ? [] : c.removedSince(since) };
   }
 }
